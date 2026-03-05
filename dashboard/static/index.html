@@ -1,0 +1,1255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AirMesh — Air Quality Monitor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Barlow:wght@300;400;600;700&family=Barlow+Condensed:wght@700;900&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<style>
+/* ── DESIGN DIRECTION: Industrial telemetry terminal — dark, monospaced readouts,
+   amber/green signal accents on near-black. Every element feels like live instrument data. ── */
+
+:root {
+  --bg:        #0a0c0f;
+  --bg2:       #0f1218;
+  --bg3:       #151b24;
+  --panel:     #141a22;
+  --border:    #1e2a38;
+  --border2:   #253345;
+  --amber:     #e8a020;
+  --amber2:    #f5c842;
+  --green:     #2ecc71;
+  --green2:    #27ae60;
+  --red:       #e74c3c;
+  --red2:      #c0392b;
+  --yellow:    #f1c40f;
+  --blue:      #3498db;
+  --cyan:      #1abc9c;
+  --text:      #c8d8e8;
+  --text2:     #7890a8;
+  --text3:     #4a6070;
+  --mono:      'Share Tech Mono', monospace;
+  --sans:      'Barlow', sans-serif;
+  --condensed: 'Barlow Condensed', sans-serif;
+  --glow-amber: 0 0 12px rgba(232,160,32,0.4);
+  --glow-green: 0 0 12px rgba(46,204,113,0.4);
+  --glow-red:   0 0 12px rgba(231,76,60,0.4);
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 14px;
+  overflow: hidden;
+}
+
+/* ── SCANLINE OVERLAY ── */
+body::before {
+  content: '';
+  position: fixed; inset: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0,0,0,0.07) 2px,
+    rgba(0,0,0,0.07) 4px
+  );
+  pointer-events: none;
+  z-index: 1000;
+}
+
+/* ── LAYOUT ── */
+.shell {
+  display: grid;
+  grid-template-rows: 52px 1fr;
+  grid-template-columns: 260px 1fr 300px;
+  height: 100vh;
+  gap: 0;
+}
+
+/* ── TOPBAR ── */
+.topbar {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 0 20px;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+  position: relative;
+}
+.topbar-logo {
+  font-family: var(--condensed);
+  font-size: 22px;
+  font-weight: 900;
+  color: var(--amber);
+  letter-spacing: 3px;
+  text-shadow: var(--glow-amber);
+}
+.topbar-logo span { color: var(--text2); font-weight: 300; font-size: 14px; letter-spacing: 1px; margin-left: 6px; }
+.topbar-status {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text2);
+}
+.ws-indicator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ws-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--red);
+  box-shadow: 0 0 8px var(--red);
+  transition: all .3s;
+}
+.ws-dot.connected { background: var(--green); box-shadow: var(--glow-green); }
+#clock { color: var(--amber); letter-spacing: 1px; }
+.sim-badge {
+  background: rgba(232,160,32,0.15);
+  border: 1px solid var(--amber);
+  color: var(--amber);
+  padding: 2px 8px;
+  border-radius: 2px;
+  font-size: 10px;
+  font-family: var(--mono);
+  letter-spacing: 2px;
+  display: none;
+}
+.sim-badge.visible { display: block; }
+.alert-bell {
+  cursor: pointer;
+  padding: 4px 8px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text2);
+  font-family: var(--mono);
+  font-size: 11px;
+  transition: all .2s;
+  position: relative;
+}
+.alert-bell:hover { border-color: var(--amber); color: var(--amber); }
+.alert-count {
+  position: absolute;
+  top: -4px; right: -4px;
+  background: var(--red);
+  color: white;
+  border-radius: 50%;
+  width: 16px; height: 16px;
+  font-size: 9px;
+  display: flex; align-items: center; justify-content: center;
+  display: none;
+}
+.alert-count.visible { display: flex; }
+
+/* ── LEFT SIDEBAR — node list ── */
+.sidebar-left {
+  background: var(--bg2);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.sidebar-title {
+  padding: 12px 16px 10px;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text3);
+  letter-spacing: 3px;
+  border-bottom: 1px solid var(--border);
+  text-transform: uppercase;
+}
+.node-list {
+  flex: 1;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border2) transparent;
+}
+.node-card {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  transition: background .15s;
+  position: relative;
+}
+.node-card:hover { background: var(--bg3); }
+.node-card.active {
+  background: rgba(232,160,32,0.08);
+  border-left: 2px solid var(--amber);
+}
+.node-card.offline { opacity: 0.4; }
+.node-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.node-dot {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.node-dot.root    { background: var(--amber); box-shadow: var(--glow-amber); }
+.node-dot.mesh    { background: var(--green); box-shadow: var(--glow-green); }
+.node-dot.ble     { background: var(--blue);  box-shadow: 0 0 8px rgba(52,152,219,.5); }
+.node-dot.offline { background: var(--text3); box-shadow: none; }
+.node-mac {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+  letter-spacing: .5px;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.node-role-badge {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 1px;
+  padding: 1px 5px;
+  border-radius: 2px;
+}
+.role-root  { background: rgba(232,160,32,.2); color: var(--amber); }
+.role-mesh  { background: rgba(46,204,113,.15); color: var(--green); }
+.role-ble   { background: rgba(52,152,219,.15); color: var(--blue); }
+.node-metrics {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3px 12px;
+}
+.nm {
+  font-size: 11px;
+  color: var(--text2);
+}
+.nm .val {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+}
+.nm.warn .val { color: var(--yellow); }
+.nm.crit .val { color: var(--red); text-shadow: var(--glow-red); }
+
+/* ── MAIN CONTENT ── */
+.main-content {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+/* Gauge row */
+.gauge-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1px;
+  background: var(--border);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.gauge-cell {
+  background: var(--panel);
+  padding: 14px 16px;
+  position: relative;
+}
+.gauge-label {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 3px;
+  color: var(--text3);
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+.gauge-value {
+  font-family: var(--mono);
+  font-size: 28px;
+  font-weight: 400;
+  line-height: 1;
+  color: var(--amber);
+  transition: color .3s, text-shadow .3s;
+}
+.gauge-value.warn { color: var(--yellow); text-shadow: 0 0 12px rgba(241,196,15,.5); }
+.gauge-value.crit { color: var(--red);    text-shadow: var(--glow-red); }
+.gauge-value.ok   { color: var(--green);  text-shadow: var(--glow-green); }
+.gauge-unit {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text2);
+  margin-top: 2px;
+}
+.gauge-bar-bg {
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  height: 3px;
+  background: var(--border);
+}
+.gauge-bar-fill {
+  height: 100%;
+  background: var(--amber);
+  transition: width .6s ease, background .3s;
+}
+.gauge-node-label {
+  font-size: 10px;
+  color: var(--text3);
+  font-family: var(--mono);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Chart area */
+.chart-area {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  gap: 1px;
+  background: var(--border);
+  overflow: hidden;
+  min-height: 0;
+}
+.chart-panel {
+  background: var(--panel);
+  padding: 12px 16px 10px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.chart-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  flex-shrink: 0;
+}
+.chart-title {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 2px;
+  color: var(--text2);
+  text-transform: uppercase;
+}
+.chart-selector {
+  background: var(--bg3);
+  border: 1px solid var(--border2);
+  color: var(--text2);
+  font-family: var(--mono);
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 2px;
+  cursor: pointer;
+  outline: none;
+}
+.chart-selector:focus { border-color: var(--amber); }
+.chart-wrap {
+  flex: 1;
+  position: relative;
+  min-height: 0;
+}
+.chart-wrap canvas { width: 100% !important; height: 100% !important; }
+
+/* ── RIGHT SIDEBAR ── */
+.sidebar-right {
+  background: var(--bg2);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* Topology */
+.topology-panel {
+  padding: 12px 16px 8px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.topo-title {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 3px;
+  color: var(--text3);
+  text-transform: uppercase;
+  margin-bottom: 8px;
+}
+.topo-svg-wrap {
+  width: 100%;
+  height: 160px;
+  position: relative;
+  overflow: hidden;
+}
+#topo-svg {
+  width: 100%;
+  height: 160px;
+}
+
+/* Network stats */
+.netstats-panel {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.stat-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+}
+.stat-row:last-child { border-bottom: none; }
+.stat-label { color: var(--text3); font-family: var(--mono); font-size: 10px; letter-spacing: 1px; }
+.stat-val   { color: var(--amber); font-family: var(--mono); font-size: 12px; }
+.stat-val.good { color: var(--green); }
+.stat-val.bad  { color: var(--red); }
+
+/* Alert log */
+.alert-log {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
+}
+.alert-log-title {
+  padding: 10px 16px 8px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 3px;
+  color: var(--text3);
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.alert-entries {
+  flex: 1;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border2) transparent;
+}
+.alert-entry {
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  animation: slideIn .3s ease;
+}
+@keyframes slideIn {
+  from { opacity: 0; transform: translateX(8px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+.alert-entry.WARNING { border-left: 2px solid var(--yellow); }
+.alert-entry.CRITICAL { border-left: 2px solid var(--red); background: rgba(231,76,60,0.05); }
+.ae-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 3px;
+}
+.ae-level {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 1px;
+  padding: 1px 5px;
+  border-radius: 2px;
+}
+.ae-level.WARNING  { background: rgba(241,196,15,.2);  color: var(--yellow); }
+.ae-level.CRITICAL { background: rgba(231,76,60,.2);   color: var(--red); }
+.ae-metric { font-family: var(--mono); font-size: 10px; color: var(--text2); text-transform: uppercase; }
+.ae-time   { font-family: var(--mono); font-size: 9px; color: var(--text3); margin-left: auto; }
+.ae-msg    { font-size: 11px; color: var(--text); }
+.ae-node   { font-family: var(--mono); font-size: 10px; color: var(--text3); margin-top: 2px; }
+
+/* No-data placeholder */
+.no-data {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 8px;
+  height: 100%;
+  color: var(--text3);
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 2px;
+}
+.spinner {
+  width: 24px; height: 24px;
+  border: 2px solid var(--border2);
+  border-top-color: var(--amber);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Flash animation on data update ── */
+@keyframes flashAmber {
+  0%   { background: rgba(232,160,32,0.15); }
+  100% { background: transparent; }
+}
+.flash { animation: flashAmber .4s ease; }
+
+/* ── Scrollbar styles ── */
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+
+/* ── Node selector tabs ── */
+.node-tabs {
+  display: flex;
+  gap: 0;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  flex-shrink: 0;
+  scrollbar-width: none;
+}
+.node-tabs::-webkit-scrollbar { display: none; }
+.node-tab {
+  padding: 8px 12px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 1px;
+  color: var(--text3);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  white-space: nowrap;
+  transition: all .15s;
+  flex-shrink: 0;
+}
+.node-tab:hover { color: var(--text2); }
+.node-tab.active { color: var(--amber); border-bottom-color: var(--amber); }
+.node-tab.ble-tab { color: var(--blue); }
+.node-tab.ble-tab.active { color: var(--blue); border-bottom-color: var(--blue); }
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <!-- ── TOPBAR ── -->
+  <header class="topbar">
+    <div class="topbar-logo">AIRMESH <span>AIR QUALITY MONITOR</span></div>
+    <div class="sim-badge" id="sim-badge">SIMULATION</div>
+    <div class="topbar-status">
+      <div class="ws-indicator">
+        <div class="ws-dot" id="ws-dot"></div>
+        <span id="ws-label">CONNECTING</span>
+      </div>
+      <span>|</span>
+      <span id="clock">--:--:--</span>
+      <span>|</span>
+      <span id="node-count">0 NODES</span>
+      <button class="alert-bell" id="alert-btn">
+        ⚑ ALERTS
+        <span class="alert-count" id="alert-count">0</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- ── LEFT SIDEBAR ── -->
+  <aside class="sidebar-left">
+    <div class="sidebar-title">MESH NODES</div>
+    <div class="node-list" id="node-list">
+      <div class="no-data" style="height:200px">
+        <div class="spinner"></div>
+        <span>AWAITING DATA</span>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ── MAIN CONTENT ── -->
+  <main class="main-content">
+    <!-- Gauge row -->
+    <div class="gauge-row" id="gauge-row">
+      <div class="gauge-cell">
+        <div class="gauge-label">CO₂</div>
+        <div class="gauge-value" id="g-co2">—</div>
+        <div class="gauge-unit">ppm</div>
+        <div class="gauge-node-label" id="g-co2-node">—</div>
+        <div class="gauge-bar-bg"><div class="gauge-bar-fill" id="g-co2-bar" style="width:0%;background:var(--amber)"></div></div>
+      </div>
+      <div class="gauge-cell">
+        <div class="gauge-label">TEMPERATURE</div>
+        <div class="gauge-value" id="g-temp">—</div>
+        <div class="gauge-unit">°C</div>
+        <div class="gauge-node-label" id="g-temp-node">—</div>
+        <div class="gauge-bar-bg"><div class="gauge-bar-fill" id="g-temp-bar" style="width:0%;background:var(--cyan)"></div></div>
+      </div>
+      <div class="gauge-cell">
+        <div class="gauge-label">HUMIDITY</div>
+        <div class="gauge-value" id="g-hum">—</div>
+        <div class="gauge-unit">% RH</div>
+        <div class="gauge-node-label" id="g-hum-node">—</div>
+        <div class="gauge-bar-bg"><div class="gauge-bar-fill" id="g-hum-bar" style="width:0%;background:var(--blue)"></div></div>
+      </div>
+      <div class="gauge-cell">
+        <div class="gauge-label">GAS / SMOKE</div>
+        <div class="gauge-value" id="g-gas">—</div>
+        <div class="gauge-unit">%</div>
+        <div class="gauge-node-label" id="g-gas-node">—</div>
+        <div class="gauge-bar-bg"><div class="gauge-bar-fill" id="g-gas-bar" style="width:0%;background:var(--green)"></div></div>
+      </div>
+    </div>
+
+    <!-- Node tabs + charts -->
+    <div class="node-tabs" id="node-tabs"></div>
+
+    <div class="chart-area" id="chart-area">
+      <div class="chart-panel">
+        <div class="chart-header">
+          <span class="chart-title">CO₂ CONCENTRATION (ppm)</span>
+          <select class="chart-selector" id="sel-co2"></select>
+        </div>
+        <div class="chart-wrap"><canvas id="chart-co2"></canvas></div>
+      </div>
+      <div class="chart-panel">
+        <div class="chart-header">
+          <span class="chart-title">TEMPERATURE (°C)</span>
+          <select class="chart-selector" id="sel-temp"></select>
+        </div>
+        <div class="chart-wrap"><canvas id="chart-temp"></canvas></div>
+      </div>
+      <div class="chart-panel">
+        <div class="chart-header">
+          <span class="chart-title">HUMIDITY (% RH)</span>
+          <select class="chart-selector" id="sel-hum"></select>
+        </div>
+        <div class="chart-wrap"><canvas id="chart-hum"></canvas></div>
+      </div>
+      <div class="chart-panel">
+        <div class="chart-header">
+          <span class="chart-title">GAS / SMOKE (%)</span>
+          <select class="chart-selector" id="sel-gas"></select>
+        </div>
+        <div class="chart-wrap"><canvas id="chart-gas"></canvas></div>
+      </div>
+    </div>
+  </main>
+
+  <!-- ── RIGHT SIDEBAR ── -->
+  <aside class="sidebar-right">
+    <div class="topology-panel">
+      <div class="topo-title">MESH TOPOLOGY</div>
+      <div class="topo-svg-wrap">
+        <svg id="topo-svg" viewBox="0 0 268 160"></svg>
+      </div>
+    </div>
+    <div class="netstats-panel">
+      <div class="sidebar-title" style="padding:0 0 8px 0;">NETWORK STATS</div>
+      <div class="stat-row">
+        <span class="stat-label">ACTIVE NODES</span>
+        <span class="stat-val" id="s-nodes">0</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">BLE BRIDGES</span>
+        <span class="stat-val" id="s-ble">0</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">AVG PDR</span>
+        <span class="stat-val good" id="s-pdr">—%</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">AVG ETX</span>
+        <span class="stat-val" id="s-etx">—</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">MESH HOPS (MAX)</span>
+        <span class="stat-val" id="s-hops">—</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">TOTAL PACKETS</span>
+        <span class="stat-val" id="s-pkts">0</span>
+      </div>
+    </div>
+    <div class="alert-log">
+      <div class="alert-log-title">ALERT LOG</div>
+      <div class="alert-entries" id="alert-entries">
+        <div style="padding:16px; color:var(--text3); font-family:var(--mono); font-size:10px; text-align:center;">NO ALERTS</div>
+      </div>
+    </div>
+  </aside>
+
+</div>
+
+<script>
+// ══════════════════════════════════════════════════════════
+// STATE
+// ══════════════════════════════════════════════════════════
+
+const state = {
+  nodes:    {},      // node_id → { latest, history[], status }
+  topology: { edges: [] },
+  alerts:   [],
+  activeNode: null,
+  isSimulation: false,
+};
+
+const CHART_MAX_POINTS = 50;
+const NODE_COLORS = [
+  '#e8a020','#2ecc71','#3498db','#e74c3c','#9b59b6','#1abc9c','#f1c40f'
+];
+let colorIdx = 0;
+const nodeColorMap = {};
+
+function nodeColor(id) {
+  if (!nodeColorMap[id]) nodeColorMap[id] = NODE_COLORS[colorIdx++ % NODE_COLORS.length];
+  return nodeColorMap[id];
+}
+
+// Chart instances
+const charts = {};
+const chartFields = {
+  'chart-co2':  'co2',
+  'chart-temp': 'temperature',
+  'chart-hum':  'humidity',
+  'chart-gas':  'gas',
+};
+const chartSelectors = {
+  'chart-co2':  'sel-co2',
+  'chart-temp': 'sel-temp',
+  'chart-hum':  'sel-hum',
+  'chart-gas':  'sel-gas',
+};
+// Track which node each chart is showing (null = all)
+const chartNodeFilter = {
+  'chart-co2':  null,
+  'chart-temp': null,
+  'chart-hum':  null,
+  'chart-gas':  null,
+};
+
+// ══════════════════════════════════════════════════════════
+// CHART SETUP
+// ══════════════════════════════════════════════════════════
+
+Chart.defaults.color = '#7890a8';
+Chart.defaults.font.family = "'Share Tech Mono', monospace";
+Chart.defaults.font.size = 10;
+
+const chartThresholds = {
+  'chart-co2':  [{ y: 1000, color: 'rgba(241,196,15,.4)', label: 'WARN 1000' },
+                 { y: 2000, color: 'rgba(231,76,60,.4)',  label: 'CRIT 2000' }],
+  'chart-temp': [{ y: 35,   color: 'rgba(241,196,15,.4)', label: 'WARN 35°C' }],
+  'chart-hum':  [{ y: 80,   color: 'rgba(52,152,219,.4)', label: 'WARN 80%' }],
+  'chart-gas':  [{ y: 40,   color: 'rgba(241,196,15,.4)', label: 'WARN 40%' },
+                 { y: 70,   color: 'rgba(231,76,60,.4)',  label: 'CRIT 70%' }],
+};
+
+function makeAnnotationPlugin(chartId) {
+  return {
+    id: 'thresholdLines',
+    afterDraw(chart) {
+      const lines = chartThresholds[chartId] || [];
+      const { ctx, chartArea: ca, scales: { y } } = chart;
+      lines.forEach(line => {
+        if (!y || y.min > line.y || y.max < line.y) return;
+        const yPos = y.getPixelForValue(line.y);
+        ctx.save();
+        ctx.strokeStyle = line.color;
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        ctx.moveTo(ca.left, yPos);
+        ctx.lineTo(ca.right, yPos);
+        ctx.stroke();
+        ctx.font = "9px 'Share Tech Mono'";
+        ctx.fillStyle = line.color;
+        ctx.fillText(line.label, ca.left + 4, yPos - 3);
+        ctx.restore();
+      });
+    }
+  };
+}
+
+function initChart(canvasId) {
+  const ctx = document.getElementById(canvasId).getContext('2d');
+  charts[canvasId] = new Chart(ctx, {
+    type: 'line',
+    data: { labels: [], datasets: [] },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: { duration: 150 },
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: {
+          display: true,
+          position: 'top',
+          labels: { boxWidth: 10, padding: 10, color: '#7890a8', font: { size: 9, family: "'Share Tech Mono', monospace" } }
+        },
+        tooltip: {
+          backgroundColor: 'rgba(15,18,24,0.95)',
+          borderColor: '#1e2a38',
+          borderWidth: 1,
+          titleColor: '#e8a020',
+          bodyColor: '#c8d8e8',
+          titleFont: { family: "'Share Tech Mono', monospace", size: 10 },
+          bodyFont:  { family: "'Share Tech Mono', monospace", size: 10 },
+        }
+      },
+      scales: {
+        x: {
+          grid: { color: '#1e2a38' },
+          ticks: { maxTicksLimit: 6, color: '#4a6070', font: { size: 9 }, maxRotation: 0 }
+        },
+        y: {
+          grid: { color: '#1e2a38' },
+          ticks: { color: '#4a6070', font: { size: 9 } }
+        }
+      }
+    },
+    plugins: [makeAnnotationPlugin(canvasId)]
+  });
+}
+
+function fmtTime(ts) {
+  const d = new Date(ts);
+  return d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function updateChart(canvasId, field) {
+  const chart = charts[canvasId];
+  if (!chart) return;
+  const filterNode = chartNodeFilter[canvasId];
+  const nodeIds = filterNode ? [filterNode] : Object.keys(state.nodes);
+
+  // Build a unified sorted label set from all timestamps across shown nodes
+  const allTimestamps = new Set();
+  nodeIds.forEach(nid => {
+    (state.nodes[nid]?.history || []).forEach(r => {
+      if (r[field] != null) allTimestamps.add(r.timestamp);
+    });
+  });
+  const sortedTs = [...allTimestamps].sort();
+  const labels = sortedTs.map(fmtTime);
+
+  const datasets = nodeIds.map(nid => {
+    const hist = state.nodes[nid]?.history || [];
+    const tsToVal = {};
+    hist.forEach(r => { if (r[field] != null) tsToVal[r.timestamp] = r[field]; });
+    const data = sortedTs.map(ts => tsToVal[ts] != null ? tsToVal[ts] : null);
+    const role = state.nodes[nid]?.status?.role || state.nodes[nid]?.latest?.role || '';
+    return {
+      label: shortMac(nid) + (role === 'BLE_RELAY' ? ' [BLE]' : ''),
+      data,
+      borderColor: nodeColor(nid),
+      backgroundColor: nodeColor(nid) + '22',
+      borderWidth: 1.5,
+      pointRadius: 0,
+      pointHoverRadius: 4,
+      tension: 0.3,
+      fill: false,
+      spanGaps: true,
+    };
+  });
+
+  chart.data.labels = labels;
+  chart.data.datasets = datasets;
+  chart.update('none');
+}
+
+function updateAllCharts() {
+  Object.entries(chartFields).forEach(([id, field]) => updateChart(id, field));
+}
+
+// ══════════════════════════════════════════════════════════
+// NODE LIST
+// ══════════════════════════════════════════════════════════
+
+function shortMac(mac) {
+  const parts = mac.split(':');
+  return parts.slice(-3).join(':');
+}
+
+function renderNodeList() {
+  const el = document.getElementById('node-list');
+  const ids = Object.keys(state.nodes);
+  if (!ids.length) return;
+
+  el.innerHTML = ids.map(nid => {
+    const n = state.nodes[nid];
+    const r = n.latest || {};
+    const s = n.status || {};
+    const role = s.role || r.role || 'MESH';
+    const online = s.online !== false;
+    const active = nid === state.activeNode;
+
+    const co2Class = r.co2 >= 2000 ? 'crit' : r.co2 >= 1000 ? 'warn' : '';
+    const gasClass = r.gas >= 70 ? 'crit' : r.gas >= 40 ? 'warn' : '';
+
+    return `<div class="node-card ${active ? 'active' : ''} ${online ? '' : 'offline'}"
+                 onclick="selectNode('${nid}')">
+      <div class="node-header">
+        <div class="node-dot ${online ? role.toLowerCase().replace('_relay','ble') : 'offline'}"></div>
+        <span class="node-mac">${shortMac(nid)}</span>
+        <span class="node-role-badge role-${role.toLowerCase().replace('_relay','ble')}">${role.replace('_RELAY','')}</span>
+      </div>
+      <div class="node-metrics">
+        <div class="nm ${co2Class}"><span class="val">${r.co2 != null ? r.co2.toFixed(0) : '—'}</span> ppm</div>
+        <div class="nm"><span class="val">${r.temperature != null ? r.temperature.toFixed(1) : '—'}</span> °C</div>
+        <div class="nm"><span class="val">${r.humidity != null ? r.humidity.toFixed(0) : '—'}</span>%RH</div>
+        <div class="nm ${gasClass}"><span class="val">${r.gas != null ? r.gas.toFixed(1) : '—'}</span>% gas</div>
+        <div class="nm"><span class="val">${r.etx != null ? r.etx.toFixed(2) : '—'}</span> ETX</div>
+        <div class="nm"><span class="val">${r.hops != null ? r.hops : '—'}</span> hops</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function selectNode(nid) {
+  state.activeNode = nid;
+  renderNodeList();
+  // Flash gauges
+  updateGauges(nid);
+}
+
+// ══════════════════════════════════════════════════════════
+// GAUGES
+// ══════════════════════════════════════════════════════════
+
+function updateGauges(nodeId) {
+  const r = state.nodes[nodeId]?.latest;
+  if (!r) return;
+
+  function setGauge(id, val, max, unit, nodeId, warnT, critT) {
+    const el = document.getElementById(`g-${id}`);
+    const bar = document.getElementById(`g-${id}-bar`);
+    const nodeEl = document.getElementById(`g-${id}-node`);
+    if (!el) return;
+    if (val == null) { el.textContent = '—'; bar.style.width = '0%'; return; }
+    el.textContent = typeof val === 'number' ? val.toFixed(id === 'co2' ? 0 : 1) : val;
+    bar.style.width = Math.min(100, (val / max) * 100) + '%';
+    el.className = 'gauge-value' + (val >= critT ? ' crit' : val >= warnT ? ' warn' : ' ok');
+    bar.style.background = val >= critT ? 'var(--red)' : val >= warnT ? 'var(--yellow)' : (id==='co2'?'var(--amber)':id==='temp'?'var(--cyan)':id==='hum'?'var(--blue)':'var(--green)');
+    if (nodeEl) nodeEl.textContent = shortMac(nodeId);
+  }
+
+  setGauge('co2',  r.co2,         2500, 'ppm', nodeId, 1000, 2000);
+  setGauge('temp', r.temperature, 50,   '°C',  nodeId, 35,   40);
+  setGauge('hum',  r.humidity,    100,  '%',   nodeId, 80,   95);
+  setGauge('gas',  r.gas,         100,  '%',   nodeId, 40,   70);
+}
+
+// Update gauges to show the active node (or first available)
+function updateGaugesWorstNode() {
+  const ids = Object.keys(state.nodes);
+  if (!ids.length) return;
+  const target = state.activeNode && state.nodes[state.activeNode] ? state.activeNode : ids[0];
+  updateGauges(target);
+}
+
+// ══════════════════════════════════════════════════════════
+// NODE TABS (for chart filtering)
+// ══════════════════════════════════════════════════════════
+
+function renderNodeTabs() {
+  const el = document.getElementById('node-tabs');
+  const ids = Object.keys(state.nodes);
+  el.innerHTML = `<div class="node-tab ${!chartNodeFilter['chart-co2'] ? 'active' : ''}"
+     onclick="filterCharts(null)">ALL</div>` +
+    ids.map(nid => {
+      const role = state.nodes[nid]?.status?.role || state.nodes[nid]?.latest?.role || 'MESH';
+      const isBle = role === 'BLE_RELAY';
+      const active = chartNodeFilter['chart-co2'] === nid;
+      return `<div class="node-tab ${isBle ? 'ble-tab' : ''} ${active ? 'active' : ''}"
+           onclick="filterCharts('${nid}')">${shortMac(nid)}${isBle ? ' ⬡' : ''}</div>`;
+    }).join('');
+
+  // Also refresh chart selector dropdowns
+  Object.entries(chartSelectors).forEach(([chartId, selId]) => {
+    const sel = document.getElementById(selId);
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">ALL NODES</option>' +
+      ids.map(nid => `<option value="${nid}" ${cur===nid?'selected':''}>${shortMac(nid)}</option>`).join('');
+  });
+}
+
+function filterCharts(nodeId) {
+  Object.keys(chartNodeFilter).forEach(k => chartNodeFilter[k] = nodeId);
+  renderNodeTabs();
+  updateAllCharts();
+}
+
+// ══════════════════════════════════════════════════════════
+// TOPOLOGY RENDERER (SVG force-inspired simple layout)
+// ══════════════════════════════════════════════════════════
+
+function renderTopology() {
+  const svg = document.getElementById('topo-svg');
+  const edges = state.topology.edges || [];
+  const nodeIds = Object.keys(state.nodes);
+  if (!nodeIds.length) { svg.innerHTML = ''; return; }
+
+  const W = 268, H = 160;
+  // Layout: root at top center, spread children below
+  const roles = {};
+  nodeIds.forEach(id => { roles[id] = state.nodes[id]?.status?.role || 'MESH'; });
+  const root = nodeIds.find(id => roles[id] === 'ROOT') || nodeIds[0];
+
+  // BFS layout
+  const positions = {};
+  const levels = {};
+  const queue = [root]; levels[root] = 0;
+  while (queue.length) {
+    const cur = queue.shift();
+    const children = edges.filter(e => e.parent === cur).map(e => e.child);
+    children.forEach(c => { if (!(c in levels)) { levels[c] = (levels[cur] || 0) + 1; queue.push(c); } });
+  }
+  const maxLevel = Math.max(0, ...Object.values(levels));
+  const byLevel = {};
+  Object.entries(levels).forEach(([id, l]) => { (byLevel[l] = byLevel[l] || []).push(id); });
+
+  const PAD = 30;
+  Object.entries(byLevel).forEach(([lvl, ids]) => {
+    const y = PAD + (parseInt(lvl) / Math.max(1, maxLevel)) * (H - PAD * 2);
+    ids.forEach((id, i) => {
+      const x = PAD + (i + 0.5) / ids.length * (W - PAD * 2);
+      positions[id] = { x, y };
+    });
+  });
+  // Any unlevel nodes
+  nodeIds.filter(id => !positions[id]).forEach((id, i) => {
+    positions[id] = { x: PAD + (i + 0.5) / nodeIds.length * (W - PAD * 2), y: H / 2 };
+  });
+
+  let html = '';
+  // Draw edges
+  edges.forEach(e => {
+    const p = positions[e.parent], c = positions[e.child];
+    if (!p || !c) return;
+    const isBle = roles[e.child] === 'BLE_RELAY';
+    html += `<line x1="${p.x}" y1="${p.y}" x2="${c.x}" y2="${c.y}"
+       stroke="${isBle ? '#3498db' : '#253345'}" stroke-width="${isBle ? '1' : '1.5'}"
+       stroke-dasharray="${isBle ? '4,3' : 'none'}"/>`;
+  });
+  // Draw nodes
+  nodeIds.forEach(id => {
+    const pos = positions[id];
+    if (!pos) return;
+    const role = roles[id];
+    const online = state.nodes[id]?.status?.online !== false;
+    const color = !online ? '#4a6070' : role === 'ROOT' ? '#e8a020' : role === 'BLE_RELAY' ? '#3498db' : '#2ecc71';
+    const r = role === 'ROOT' ? 9 : 6;
+    html += `<circle cx="${pos.x}" cy="${pos.y}" r="${r}"
+       fill="${color}22" stroke="${color}" stroke-width="1.5"/>`;
+    html += `<text x="${pos.x}" y="${pos.y + r + 9}" text-anchor="middle"
+       fill="${color}" font-size="8" font-family="'Share Tech Mono',monospace"
+       >${shortMac(id)}</text>`;
+  });
+
+  svg.innerHTML = html;
+}
+
+// ══════════════════════════════════════════════════════════
+// NETWORK STATS
+// ══════════════════════════════════════════════════════════
+
+function updateNetStats() {
+  const ids = Object.keys(state.nodes);
+  const online = ids.filter(id => state.nodes[id]?.status?.online !== false);
+  const ble = ids.filter(id => (state.nodes[id]?.status?.role || state.nodes[id]?.latest?.role) === 'BLE_RELAY');
+
+  const pdrs = ids.map(id => state.nodes[id]?.status?.pdr).filter(v => v != null);
+  const avgPdr = pdrs.length ? (pdrs.reduce((a,b) => a+b,0) / pdrs.length).toFixed(1) : '—';
+
+  const etxs = ids.map(id => state.nodes[id]?.latest?.etx).filter(v => v != null);
+  const avgEtx = etxs.length ? (etxs.reduce((a,b) => a+b,0) / etxs.length).toFixed(2) : '—';
+
+  const hops = ids.map(id => state.nodes[id]?.latest?.hops).filter(v => v != null);
+  const maxHops = hops.length ? Math.max(...hops) : '—';
+
+  const totalPkts = ids.reduce((a, id) => a + (state.nodes[id]?.status?.total_packets || 0), 0);
+
+  document.getElementById('s-nodes').textContent = `${online.length}/${ids.length}`;
+  document.getElementById('s-ble').textContent   = ble.length;
+  document.getElementById('s-pdr').textContent   = avgPdr !== '—' ? `${avgPdr}%` : '—';
+  document.getElementById('s-etx').textContent   = avgEtx;
+  document.getElementById('s-hops').textContent  = maxHops;
+  document.getElementById('s-pkts').textContent  = totalPkts;
+
+  const pdrEl = document.getElementById('s-pdr');
+  pdrEl.className = 'stat-val' + (parseFloat(avgPdr) < 80 ? ' bad' : parseFloat(avgPdr) >= 95 ? ' good' : '');
+
+  document.getElementById('node-count').textContent = `${online.length} NODES`;
+}
+
+// ══════════════════════════════════════════════════════════
+// ALERTS
+// ══════════════════════════════════════════════════════════
+
+function renderAlerts() {
+  const el = document.getElementById('alert-entries');
+  if (!state.alerts.length) {
+    el.innerHTML = '<div style="padding:16px; color:var(--text3); font-family:var(--mono); font-size:10px; text-align:center;">NO ALERTS</div>';
+    return;
+  }
+  el.innerHTML = state.alerts.slice(0, 30).map(a => {
+    const t = new Date(a.timestamp);
+    const tStr = t.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    return `<div class="alert-entry ${a.level}">
+      <div class="ae-top">
+        <span class="ae-level ${a.level}">${a.level}</span>
+        <span class="ae-metric">${a.metric.toUpperCase()}</span>
+        <span class="ae-time">${tStr}</span>
+      </div>
+      <div class="ae-msg">${a.message} (${a.value.toFixed(1)})</div>
+      <div class="ae-node">${shortMac(a.node_id)}</div>
+    </div>`;
+  }).join('');
+
+  const count = state.alerts.length;
+  const countEl = document.getElementById('alert-count');
+  countEl.textContent = count > 99 ? '99+' : count;
+  countEl.classList.toggle('visible', count > 0);
+}
+
+// ══════════════════════════════════════════════════════════
+// WEBSOCKET
+// ══════════════════════════════════════════════════════════
+
+let ws = null, wsReconnectTimer = null;
+
+function connectWS() {
+  const wsUrl = `ws://${location.host}/ws`;
+  ws = new WebSocket(wsUrl);
+
+  ws.onopen = () => {
+    document.getElementById('ws-dot').classList.add('connected');
+    document.getElementById('ws-label').textContent = 'LIVE';
+    clearTimeout(wsReconnectTimer);
+  };
+
+  ws.onclose = () => {
+    document.getElementById('ws-dot').classList.remove('connected');
+    document.getElementById('ws-label').textContent = 'RECONNECTING';
+    wsReconnectTimer = setTimeout(connectWS, 3000);
+  };
+
+  ws.onmessage = (evt) => {
+    const msg = JSON.parse(evt.data);
+    handleMessage(msg);
+  };
+}
+
+function handleMessage(msg) {
+  switch (msg.type) {
+    case 'snapshot':
+      // Full state on connect
+      state.nodes = {};
+      Object.entries(msg.nodes || {}).forEach(([nid, data]) => {
+        state.nodes[nid] = {
+          latest: data.latest,
+          history: data.history || [],
+          status: data.status || {},
+        };
+        if (!nodeColorMap[nid]) nodeColor(nid);
+      });
+      if (msg.topology) state.topology = msg.topology;
+      if (msg.alerts) state.alerts = msg.alerts;
+      if (!state.activeNode && Object.keys(state.nodes).length)
+        state.activeNode = Object.keys(state.nodes)[0];
+      if (msg.nodes && Object.values(msg.nodes).some(n => n.latest?.role === 'BLE_RELAY'))
+        document.getElementById('sim-badge').classList.add('visible');
+      renderAll();
+      break;
+
+    case 'reading':
+      if (!state.nodes[msg.node_id]) {
+        state.nodes[msg.node_id] = { latest: null, history: [], status: {} };
+        nodeColor(msg.node_id);
+      }
+      state.nodes[msg.node_id].latest  = msg.data;
+      state.nodes[msg.node_id].history = [...(state.nodes[msg.node_id].history || []), msg.data].slice(-CHART_MAX_POINTS);
+      if (msg.status) state.nodes[msg.node_id].status = msg.status;
+      if (!state.activeNode) state.activeNode = msg.node_id;
+      renderNodeList();
+      updateAllCharts();
+      updateGaugesWorstNode();
+      updateNetStats();
+      renderTopology();
+      break;
+
+    case 'alert':
+      state.alerts.unshift(msg.data);
+      if (state.alerts.length > 100) state.alerts.pop();
+      renderAlerts();
+      break;
+
+    case 'status':
+      if (!state.nodes[msg.node_id]) state.nodes[msg.node_id] = { latest: null, history: [], status: {} };
+      state.nodes[msg.node_id].status = msg.data;
+      renderNodeList();
+      updateNetStats();
+      break;
+
+    case 'topology':
+      state.topology = msg.data;
+      renderTopology();
+      break;
+  }
+
+  // Detect simulation mode from BLE_RELAY presence
+  const hasRelay = Object.values(state.nodes).some(n =>
+    n.status?.role === 'BLE_RELAY' || n.latest?.role === 'BLE_RELAY');
+  document.getElementById('sim-badge').classList.toggle('visible', hasRelay || msg._sim);
+}
+
+function renderAll() {
+  renderNodeList();
+  renderNodeTabs();
+  updateAllCharts();
+  updateGaugesWorstNode();
+  updateNetStats();
+  renderTopology();
+  renderAlerts();
+}
+
+// ══════════════════════════════════════════════════════════
+// CLOCK
+// ══════════════════════════════════════════════════════════
+
+function updateClock() {
+  document.getElementById('clock').textContent =
+    new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+setInterval(updateClock, 1000);
+updateClock();
+
+// ══════════════════════════════════════════════════════════
+// INIT
+// ══════════════════════════════════════════════════════════
+
+// Init chart selectors — attach listeners (innerHTML populated by renderNodeTabs)
+Object.entries(chartSelectors).forEach(([chartId, selId]) => {
+  const sel = document.getElementById(selId);
+  sel.addEventListener('change', () => {
+    chartNodeFilter[chartId] = sel.value || null;
+    updateChart(chartId, chartFields[chartId]);
+  });
+});
+
+// Init charts
+Object.keys(chartFields).forEach(initChart);
+
+// Connect WS
+connectWS();
+
+// Periodic full re-render (to update "last seen" staleness, offline detection)
+setInterval(() => {
+  renderNodeList();
+  updateNetStats();
+  updateGaugesWorstNode();
+}, 5000);
+</script>
+</body>
+</html>
