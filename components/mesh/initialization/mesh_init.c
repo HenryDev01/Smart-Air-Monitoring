@@ -164,6 +164,7 @@ static void mesh_recv_task(void *arg)
                 pkt_sensor_t *pkt = (pkt_sensor_t *)hdr;
                 ESP_LOGI(TAG, "Sensor data from " MACSTR, MAC2STR(from.addr));
                 ESP_LOGI(TAG, "  Temperature: %.1f°C", pkt->temperature);
+                ESP_LOGI(TAG, "  Humidity: %.1f%%", pkt->humidity);
                 ESP_LOGI(TAG, "  Smoke: %.1f%%", pkt->smoke);
                 ESP_LOGI(TAG, "  ETX to root: %.2f", pkt->etx_to_root);
                 ESP_LOGI(TAG, "  Hop count: %d", pkt->hop_count);

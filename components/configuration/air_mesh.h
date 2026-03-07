@@ -82,6 +82,7 @@ typedef struct __attribute__((packed)) {
 typedef struct __attribute__((packed)) {
     pkt_hdr_t  hdr;
     float      temperature;
+    float      humidity; 
     float      smoke;       
     uint8_t    hop_count;
     float      etx_to_root;
