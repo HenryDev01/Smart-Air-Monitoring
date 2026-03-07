@@ -42,5 +42,10 @@
 - **CheckSum error**: Try shorter wires, stable power.
 - **No readings**: Confirm correct GPIO and pull-up resistor.
 
+## Attribution
+
+DHT22 driver logic and explanation adapted from  
+[https://esp32tutorials.com/dht22-esp32-esp-idf/](https://esp32tutorials.com/dht22-esp32-esp-idf/)  
+(licensed under CC0/public domain).
 ---
 
