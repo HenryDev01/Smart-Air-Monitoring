@@ -8,6 +8,9 @@
 
 #include "../../configuration/air_mesh.h"
 #include "../routing/mesh_routing.h"
+#include "esp_coexist.h"
+#include "ble_mesh_init.h"
+#include "../display/display.h"
 
 static const char *TAG = "MESH_INIT";
 
@@ -64,9 +67,18 @@ static void mesh_event_handler(void *arg, esp_event_base_t base,
             esp_err_t err = esp_mesh_send(NULL, &data, 0, NULL, 0);
             ESP_LOGI(TAG, "Send to root result: %s", esp_err_to_name(err));
         }
-        break;
-    }
 
+        /* ── BLE mesh init once WiFi mesh is connected ── */  
+        esp_err_t ble_ret = ble_mesh_init();
+        if (ble_ret != ESP_OK) {
+            ESP_LOGE(TAG, "BLE mesh init failed: %s",
+                    esp_err_to_name(ble_ret));
+        } else {
+            ESP_LOGI(TAG, "BLE mesh init OK");
+            }
+        }                                                      
+        break;
+    
     case MESH_EVENT_PARENT_DISCONNECTED: {
         mesh_event_disconnected_t *disc = (mesh_event_disconnected_t *)event_data;
         ESP_LOGW(TAG, "Parent disconnected, reason: %d", disc->reason);
@@ -117,6 +129,7 @@ static void ip_event_handler(void *arg, esp_event_base_t base,
     if (id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *evt = data;
         ESP_LOGI(TAG, "Root got IP: " IPSTR, IP2STR(&evt->ip_info.ip));
+        display_print(10, 85, "WiFi OK!", COLOR_GREEN, COLOR_BLACK);
     }
 }
 
@@ -192,6 +205,14 @@ static void mesh_recv_task(void *arg)
 esp_err_t mesh_init(void)
 {
     esp_err_t ret;
+
+    /* 0. WiFi + BLE coexistence */
+    ret = esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Coex preference set failed: %s", esp_err_to_name(ret));
+        /* non-fatal — continue */
+    }
+    ESP_LOGI(TAG, "WiFi/BLE coexistence enabled (balanced)");
 
     /* 1. NVS */
     ret = nvs_flash_init();
