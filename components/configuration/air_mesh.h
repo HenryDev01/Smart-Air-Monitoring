@@ -8,17 +8,17 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
+#include "esp_ble_mesh_defs.h"
+#include "secrets.h"
 
 /* ─────────────────────────────────────────────
    MESH CONFIGURATION
    ───────────────────────────────────────────── */
 #define MESH_ID              {0xAB, 0x72, 0x4D, 0x6F, 0x6E, 0x00}  // "AirMon"
-#define MESH_PASSWORD        "AirMonitor2024!"
 #define MESH_CHANNEL         6
 #define MESH_MAX_LAYERS      6
 #define MESH_AP_MAX_CONN     6
-#define MESH_ROUTER_SSID      "Boey"
-#define MESH_ROUTER_PASSWORD  "Boey!23456789"
+
 
 /* ─────────────────────────────────────────────
    ETX / ROUTING CONFIGURATION
@@ -52,6 +52,32 @@
 #define SENSOR_INTERVAL_MS   30000     // 30s between readings
 #define CPU_MAX_FREQ_MHZ     80
 #define CPU_MIN_FREQ_MHZ     10
+
+/* ─────────────────────────────────────────────
+   BLE MESH CONFIGURATION
+   ───────────────────────────────────────────── */
+#define BLE_MESH_COMPANY_ID        0x02E5   // Espressif
+#define BLE_MESH_PRODUCT_ID        0x0001
+#define BLE_MESH_VERSION_ID        0x0001
+
+#define BLE_MESH_APP_KEY_IDX       0x0000
+#define BLE_MESH_NET_KEY_IDX       0x0000
+#define BLE_MESH_GROUP_ADDR        0xC000   // multicast group for all nodes
+
+#define BLE_MESH_SENSOR_MODEL_ID   0x1100   // vendor model: sensor data
+#define BLE_MESH_ALERT_MODEL_ID    0x1101   // vendor model: alerts/gossip
+#define BLE_MESH_HELLO_MODEL_ID    0x1102   // vendor model: node discovery
+
+#define AIR_MESH_TTL_DEFAULT       7
+#define BLE_MESH_SEND_TIMEOUT_MS   3000
+
+/* ─────────────────────────────────────────────
+   BLE MESH OPCODES (Vendor Model)
+   ───────────────────────────────────────────── */
+#define BLE_MESH_VND_OP_SENSOR     ESP_BLE_MESH_MODEL_OP_3(0x00, BLE_MESH_COMPANY_ID)
+#define BLE_MESH_VND_OP_ALERT      ESP_BLE_MESH_MODEL_OP_3(0x01, BLE_MESH_COMPANY_ID)
+#define BLE_MESH_VND_OP_HELLO      ESP_BLE_MESH_MODEL_OP_3(0x02, BLE_MESH_COMPANY_ID)
+#define BLE_MESH_VND_OP_SENSOR_ACK ESP_BLE_MESH_MODEL_OP_3(0x03, BLE_MESH_COMPANY_ID)
 
 /* ─────────────────────────────────────────────
    PACKET TYPES
