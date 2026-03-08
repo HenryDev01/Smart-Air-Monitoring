@@ -117,7 +117,13 @@ SmartAirMonitoring/
 ├── .gitignore                      ✅ excludes secrets.h, build/, sdkconfig
 └── CMakeLists.txt
 ```
-
+## Setup secrets.h
+1. Create components/configuration/secrets.h
+2. Fill in your WiFi credentials 
+#define MESH_ROUTER_SSID      "YOUR_WIFI_SSID"
+#define MESH_ROUTER_PASSWORD  "YOUR_WIFI_PASSWORD"
+#define MESH_PASSWORD         "YOUR_MESH_PASSWORD"
+3. Run idf.py build
 ---
 
 ## Component Status
