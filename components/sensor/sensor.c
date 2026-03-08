@@ -6,11 +6,12 @@
 #include "freertos/task.h"
 #include "esp_mac.h"
 #include "driver/gpio.h"
-
 #include "../configuration/air_mesh.h"
 #include "../mesh/routing/mesh_routing.h"
 #include "../display/display.h"
 #include "dht22/DHT22.h"
+#include "../mesh/ble_mesh/ble_mesh_init.h"
+#include <string.h>
 
 // ============================================
 // TEST MODE: Set to 1 for step-by-step testing without mesh
@@ -58,7 +59,7 @@ static void test_sensor_reading(void *arg)
     
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "DHT22 TEST MODE - No mesh networking");
-    ESP_LOGI(TAG, "Sensor will read every 5 seconds");
+    ESP_LOGI(TAG, "Sensor will read every 10 seconds");
     ESP_LOGI(TAG, "========================================");
     
     // Initial display
@@ -101,20 +102,20 @@ static void test_sensor_reading(void *arg)
             
             // Temperature
             snprintf(line1, sizeof(line1), "Temp: %.1fC", temperature);
-            display_print(10, 35, line1, COLOR_GREEN, COLOR_BLACK);
+            display_print(10, 25, line1, COLOR_GREEN, COLOR_BLACK);
             
             // Humidity
             snprintf(line2, sizeof(line2), "Hum:  %.1f%%", humidity);
-            display_print(10, 55, line2, COLOR_GREEN, COLOR_BLACK);
+            display_print(10, 45, line2, COLOR_GREEN, COLOR_BLACK);
             
             // Reading count
             snprintf(line3, sizeof(line3), "Read: %lu", reading_count);
-            display_print(10, 75, line3, COLOR_YELLOW, COLOR_BLACK);
+            display_print(10, 65, line3, COLOR_YELLOW, COLOR_BLACK);
         }
         
-        ESP_LOGI(TAG, "Next reading in 5 seconds...");
-        vTaskDelay(pdMS_TO_TICKS(5000)); // Read every 5 seconds
-    }
+        ESP_LOGI(TAG, "Next reading in 10 seconds...");
+        vTaskDelay(pdMS_TO_TICKS(10000)); // Read every 10 seconds
+    }   
 }
 
 #else
@@ -170,9 +171,33 @@ static void send_sensor_reading(void *arg)
         //send to root
         esp_err_t err = esp_mesh_send(NULL, &data, MESH_DATA_TODS, NULL, 0);
 
+        // ALSO broadcast over BLE mesh to neighbors    
+        esp_err_t ble_err = ble_mesh_send_sensor(
+            pkt.temperature,
+            pkt.humidity,
+            pkt.smoke);
+        if (ble_err != ESP_OK) {
+            ESP_LOGW(TAG, "BLE mesh sensor send failed: %s",
+                esp_err_to_name(ble_err));
+        }   else {
+                ESP_LOGI(TAG, "BLE mesh sensor sent OK");
+        }           
+        // trigger BLE alert if readings are dangerous  // 
+        if (pkt.temperature > 35.0f) {
+            char alert[] = "ALERT:HIGH_TEMP";
+            ble_mesh_send_alert(alert, strlen(alert));
+            ESP_LOGW(TAG, "High temperature alert sent over BLE mesh");
+        }
+        if (pkt.smoke > 70.0f) {
+            char alert[] = "ALERT:HIGH_SMOKE";
+            ble_mesh_send_alert(alert, strlen(alert));
+            ESP_LOGW(TAG, "High smoke alert sent over BLE mesh");
+        }     
+
+
         ESP_LOGI(TAG, "I am " MACSTR ", layer %d",
-         MAC2STR(s_my_mac),
-         esp_mesh_get_layer());
+        MAC2STR(s_my_mac),
+        esp_mesh_get_layer());
 
         if (!esp_mesh_is_root()) {
             mesh_addr_t parent;
@@ -189,6 +214,7 @@ static void send_sensor_reading(void *arg)
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "Send failed: %s", esp_err_to_name(err));
         }
+        ble_mesh_send_hello(routing_get_etx_to_root(), (uint8_t)esp_mesh_get_layer());
         vTaskDelay(pdMS_TO_TICKS(10000)); // send every 10s
     }
 
