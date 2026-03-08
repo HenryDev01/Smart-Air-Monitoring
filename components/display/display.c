@@ -33,7 +33,7 @@ static const char *TAG = "DISPLAY";
 /* ── state ────────────────────────────────────────────────── */
 static esp_lcd_panel_handle_t    s_panel = NULL;
 static esp_lcd_panel_io_handle_t s_io    = NULL;
-static uint16_t                  s_fb[LCD_W * LCD_H];
+static uint16_t                  *s_fb = NULL;
 
 /* ── Simple 5x7 font (ASCII 32–122) ──────────────────────── */
 static const uint8_t font5x7[][5] = {
@@ -178,6 +178,16 @@ static void flush_region(int x1, int y1, int x2, int y2)
 /* ── public: init ─────────────────────────────────────────── */
 esp_err_t display_init(void)
 {
+    /* Allocate framebuffer from DMA-capable internal RAM */
+    s_fb = heap_caps_malloc(LCD_W * LCD_H * sizeof(uint16_t),
+                            MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    if (!s_fb) {
+        ESP_LOGE(TAG, "Framebuffer alloc failed");
+        return ESP_ERR_NO_MEM;
+    }
+    ESP_LOGI(TAG, "Framebuffer allocated: %d bytes",
+             LCD_W * LCD_H * sizeof(uint16_t));
+
     // Power on display via AXP192
     axp192_init();
 
