@@ -5,4 +5,6 @@ idf_component_register(
     REQUIRES mesh
     REQUIRES sensor
     REQUIRES display
+    REQUIRES utils
+    REQUIRES air_mqtt
 )

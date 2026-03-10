@@ -9,7 +9,8 @@
 
 #include "../configuration/air_mesh.h"
 #include "../mesh/routing/mesh_routing.h"
-
+#include "../utils/utils.h"
+#include "../mesh/auth/mesh_auth.h"
 
 static uint32_t s_sensor_seq = 0;
 static uint8_t  s_my_mac[6]  = {0};
@@ -34,9 +35,10 @@ static void send_sensor_reading(void *arg)
     // need to check whcih node has sensor
 
     while (1) {
+
         // Wait until mesh is up and we have a parent
         if (!esp_mesh_is_device_active()) {
-            ESP_LOGW(TAG, "Mesh not connected, waiting...");
+            ESP_LOGW(TAG, "Device is not active, waiting...");
             vTaskDelay(pdMS_TO_TICKS(2000));
             continue;
         }
@@ -70,20 +72,25 @@ static void send_sensor_reading(void *arg)
 
         if (!esp_mesh_is_root()) {
             mesh_addr_t parent;
+            uint8_t parent_sta_mac[6];
+
             esp_err_t parent_err = esp_mesh_get_parent_bssid(&parent);
+            
             ESP_LOGI(TAG, "My parent is " MACSTR "",
                 MAC2STR(parent.addr));
             if (parent_err == ESP_OK) {
-                // ESP_LOGI(TAG, "Sent sensor data to parent " MACSTR ": %s",
-                //         MAC2STR(parent.addr), esp_err_to_name(err));
-                routing_record_tx(parent.addr, err == ESP_OK); // true=success, false=fail
+
+                ap_to_sta_mac(parent.addr, parent_sta_mac);
+
+                ESP_LOGI(TAG, "Parent AP: " MACSTR, MAC2STR(parent.addr));
+                ESP_LOGI(TAG, "Parent STA: " MACSTR, MAC2STR(parent_sta_mac));
+                routing_record_tx(parent_sta_mac, err == ESP_OK); // true=success, false=fail
             }
         }
-
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "Send failed: %s", esp_err_to_name(err));
         }
-        vTaskDelay(pdMS_TO_TICKS(10000)); // send every 5s
+        vTaskDelay(pdMS_TO_TICKS(SENSOR_INTERVAL_MS)); 
     }
 
 }

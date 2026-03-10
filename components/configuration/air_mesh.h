@@ -17,8 +17,9 @@
 #define MESH_CHANNEL         6
 #define MESH_MAX_LAYERS      6
 #define MESH_AP_MAX_CONN     6
-#define MESH_ROUTER_SSID      "Boey"
-#define MESH_ROUTER_PASSWORD  "Boey!23456789"
+#define MESH_ROUTER_SSID      "Galaxy S23 FE 13E4"
+#define MESH_ROUTER_PASSWORD  "Henry123"
+#define MESH_GROUP_ID        {0x01,0x00,0x00,0x00,0x00,0x01}  // for group messages
 
 /* ─────────────────────────────────────────────
    ETX / ROUTING CONFIGURATION
@@ -54,6 +55,14 @@
 #define CPU_MIN_FREQ_MHZ     10
 
 /* ─────────────────────────────────────────────
+   MQTT CONFIGURATION
+   ───────────────────────────────────────────── */
+#define MQTT_BROKER_URL  "mqtts://5d06f91f99b9410e89ba2a03fb2df821.s1.eu.hivemq.cloud:8883"
+#define MQTT_USERNAME    "esps3"   // ← fill in
+#define MQTT_PASSWORD    "Password1"   // ← fill in
+
+
+/* ─────────────────────────────────────────────
    PACKET TYPES
    ───────────────────────────────────────────── */
 typedef enum {
@@ -65,7 +74,13 @@ typedef enum {
     PKT_CHALLENGE      = 0x12,
     PKT_CHALLENGE_RESP = 0x13,
     PKT_SESSION_REVOKE = 0x14,
+    PKT_KICK           = 0x15,
+    PKT_AUTH_SUCCESS   = 0x16,
 } pkt_type_t;
+
+typedef enum{
+    CFG_TYPE_THRESHOLD = 0x01,
+}config_type_t;
 
 /* ─────────────────────────────────────────────
    PACKET STRUCTURES
@@ -132,6 +147,12 @@ typedef struct __attribute__((packed)) {
     uint8_t    response[32];   // HMAC-SHA256(challenge, key)
 } pkt_challenge_resp_t;
 
+
+typedef struct __attribute__((packed))  {
+    pkt_hdr_t  hdr;
+    uint8_t root_mac[6];
+} pkt_auth_ok_t;
+
 /* ─────────────────────────────────────────────
    NEIGHBOR TABLE ENTRY
    ───────────────────────────────────────────── */
@@ -157,3 +178,13 @@ typedef struct {
     bool       authenticated;
     uint8_t    fail_count;
 } session_t;
+
+
+// config
+typedef struct {
+    uint8_t type;
+    uint8_t temp_max;
+    uint8_t smoke_max;
+} sensor_cfg_t;
+
+

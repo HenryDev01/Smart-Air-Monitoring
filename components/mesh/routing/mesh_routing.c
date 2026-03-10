@@ -37,6 +37,19 @@ static float compute_etx(const neighbor_t *n)
 // find source neighbor table by MAC address 
 static neighbor_t *find_nb(const uint8_t *mac)
 {
+    if(!esp_mesh_is_root())
+    {
+              ESP_LOGI(TAG, "Find Neighbor " MACSTR "",
+                 MAC2STR(mac));
+
+                  for (int i = 0; i < NEIGHBOR_MAX; i++)
+                  {
+                     ESP_LOGI(TAG, "Neighbor[%d]: valid=%d " MACSTR, i, s_nb[i].valid, MAC2STR(s_nb[i].mac));
+
+                  }
+    }
+  
+    
     for (int i = 0; i < NEIGHBOR_MAX; i++)
         if (s_nb[i].valid && memcmp(s_nb[i].mac, mac, 6) == 0)
             return &s_nb[i];
@@ -105,10 +118,10 @@ void routing_handle_hello(const pkt_hello_t *pkt, const mesh_addr_t *from)
 
     xSemaphoreTake(s_nb_mutex, portMAX_DELAY);
 
-    neighbor_t *n = find_nb(from->addr);
+    neighbor_t *n = find_nb(pkt->hdr.src_id);
     if (!n) {
         n = alloc_nb();
-        memcpy(n->mac, from->addr, 6);
+        memcpy(n->mac, pkt->hdr.src_id, 6);  // ← same key
         n->etx = ETX_INFINITY;
         ESP_LOGI(TAG, "New neighbor " MACSTR, MAC2STR(from->addr));
     }
@@ -142,7 +155,7 @@ void routing_update_parent(void)
         neighbor_t *n = &s_nb[i];
         if (!n->valid) continue;
         /* Prune stale */
-        if ((t - n->last_hello_ms) > NEIGHBOR_TIMEOUT_MS) {
+        if ((t - n->last_hello_ms) > NEIGHBOR_TIMEOUT_MS) { // if neighbor is not heard from for a long time. remve it.
             ESP_LOGD(TAG, "Pruned stale " MACSTR, MAC2STR(n->mac));
             n->valid = false;
             continue;
@@ -243,7 +256,7 @@ void routing_init(void)
     s_nb_mutex = xSemaphoreCreateMutex();
 
     /* IDF 5.5: use esp_read_mac() for STA MAC */
-    esp_read_mac(s_my_mac, ESP_MAC_WIFI_SOFTAP);  // ← changed from ESP_MAC_WIFI_STA    
+    esp_read_mac(s_my_mac, ESP_MAC_WIFI_STA);  // ← changed from ESP_MAC_WIFI_STA    
     routing_reset_etx();
 
     /* pinned to core 1, low priority — background task */
