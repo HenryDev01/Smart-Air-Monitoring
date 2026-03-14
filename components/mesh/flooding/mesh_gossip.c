@@ -11,6 +11,8 @@
  */
 
 #include "mesh_gossip.h"
+#include "../../sensor/sensor.h"
+#include "../../air_mqtt/air_mqtt.h"
 
 #include "esp_mesh.h"
 #include "esp_random.h"
@@ -141,9 +143,20 @@ void gossip_process_payload(const uint8_t *payload, uint8_t len)
 
         int temp_threshold  = cfg->temp_max;
         int smoke_threshold = cfg->smoke_max;
+        sensor_set_thresholds(cfg->temp_max, cfg->smoke_max);
+
 
         ESP_LOGI(TAG, "Threshold updated temp=%d smoke=%d",
                  temp_threshold, smoke_threshold);
+    }
+    else if (cfg->type == CFG_TYPE_ALERT) {
+        ESP_LOGW(TAG, "⚠️ Alert from " MACSTR " temp=%.1f smoke=%.1f",
+                 MAC2STR(cfg->src_mac), cfg->temp_val, cfg->smoke_val);
+
+        if (esp_mesh_is_root()) {
+            mqtt_publish_alert(cfg->src_mac, cfg->temp_val,
+                               cfg->smoke_val, cfg->alert_flags);
+        }
     }
 }
 

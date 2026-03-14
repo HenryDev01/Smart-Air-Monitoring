@@ -11,6 +11,10 @@
 #include "../mesh/routing/mesh_routing.h"
 #include "../utils/utils.h"
 #include "../mesh/auth/mesh_auth.h"
+#include "../mesh/flooding/mesh_gossip.h"
+
+static uint8_t s_temp_max  = 35;
+static uint8_t s_smoke_max = 40;
 
 static uint32_t s_sensor_seq = 0;
 static uint8_t  s_my_mac[6]  = {0};
@@ -43,13 +47,37 @@ static void send_sensor_reading(void *arg)
             continue;
         }
         ESP_LOGI(TAG, "Sensor task started");
+        float temp  = read_temperature();
+        float smoke = read_mq2_smoke();
+
+        //alert
+          uint8_t alert_flags = 0;
+        if ((uint8_t)temp  > s_temp_max)  alert_flags |= 0x01;
+        if ((uint8_t)smoke > s_smoke_max) alert_flags |= 0x02;
+
+        if (alert_flags) {
+            ESP_LOGW(TAG, "⚠️ ALERT — temp=%.1f (max=%d) smoke=%.1f (max=%d)",
+                     temp, s_temp_max, smoke, s_smoke_max);
+
+            sensor_cfg_t alert = {
+                .type        = CFG_TYPE_ALERT,
+                .alert_flags = alert_flags,
+                .temp_val    = temp,
+                .smoke_val   = smoke,
+            };
+            memcpy(alert.src_mac, s_my_mac, 6);
+            gossip_send((uint8_t *)&alert, sizeof(alert), GOSSIP_TTL_DEFAULT);
+        }
+
+
+        // sensor packet
         pkt_sensor_t pkt = {
             .hdr = {
                 .type = PKT_SENSOR_DATA,
                 .seq  = s_sensor_seq++,
             },
-            .temperature = read_temperature(),
-            .smoke    = read_mq2_smoke(),
+            .temperature = temp,
+            .smoke    = smoke,
             .hop_count   = (uint8_t)esp_mesh_get_layer(),
             .etx_to_root = routing_get_etx_to_root(),
         };
@@ -94,6 +122,13 @@ static void send_sensor_reading(void *arg)
     }
 
 }
+void sensor_set_thresholds(uint8_t temp_max, uint8_t smoke_max)
+{
+    s_temp_max  = temp_max;
+    s_smoke_max = smoke_max;
+    ESP_LOGI(TAG, "Thresholds updated — temp=%d smoke=%d", temp_max, smoke_max);
+}
+
 void sensor_init(void)
 {
     esp_read_mac(s_my_mac, ESP_MAC_WIFI_STA);

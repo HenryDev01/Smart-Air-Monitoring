@@ -11,6 +11,7 @@
 #include "../flooding/mesh_gossip.h"
 #include "../auth/mesh_auth.h"
 #include "../../air_mqtt/air_mqtt.h"
+#include "../../ble_mesh/bridge/ble_bridge.h"
 
 static const char *TAG = "MESH_INIT";
 
@@ -19,6 +20,7 @@ static esp_netif_t *s_netif_ap   = NULL;
 static TaskHandle_t s_recv_task_handle = NULL;
 static int s_kick_count = 0;
 static bool s_mqtt_initialized = false;
+bool is_mesh_connected = false;  
 
 #define MAX_KICK_COUNT  3
 
@@ -109,6 +111,7 @@ static void mesh_event_handler(void *arg, esp_event_base_t base,
         break;
 
     case MESH_EVENT_PARENT_CONNECTED: {
+        is_mesh_connected = true;
         layer = esp_mesh_get_layer();
         ESP_LOGI(TAG, "Connected to parent. Layer: %d", layer);
           /* Send join request to authenticate with root */
@@ -138,6 +141,7 @@ static void mesh_event_handler(void *arg, esp_event_base_t base,
     }
 
     case MESH_EVENT_PARENT_DISCONNECTED: {
+        is_mesh_connected = false;
         mesh_event_disconnected_t *disc = (mesh_event_disconnected_t *)event_data;
         ESP_LOGW(TAG, "Parent disconnected, reason: %d", disc->reason);
         routing_invalidate_parent();
@@ -194,6 +198,7 @@ static void ip_event_handler(void *arg, esp_event_base_t base,
         
         if(esp_mesh_is_root() && !s_mqtt_initialized)
         {
+            //ble_bridge_set_root(true);
             s_mqtt_initialized = true;
             mqtt_init();
         }
@@ -327,6 +332,8 @@ esp_err_t mesh_init(void)
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
+
+    
 
     /* 2. TCP/IP stack + event loop */
     ESP_ERROR_CHECK(esp_netif_init());

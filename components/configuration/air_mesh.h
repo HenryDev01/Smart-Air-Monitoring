@@ -17,8 +17,8 @@
 #define MESH_CHANNEL         6
 #define MESH_MAX_LAYERS      6
 #define MESH_AP_MAX_CONN     6
-#define MESH_ROUTER_SSID      "Galaxy S23 FE 13E4"
-#define MESH_ROUTER_PASSWORD  "Henry123"
+#define MESH_ROUTER_SSID      "Boey"
+#define MESH_ROUTER_PASSWORD  "Boey!23456789"
 #define MESH_GROUP_ID        {0x01,0x00,0x00,0x00,0x00,0x01}  // for group messages
 
 /* ─────────────────────────────────────────────
@@ -61,6 +61,8 @@
 #define MQTT_USERNAME    "esps3"   // ← fill in
 #define MQTT_PASSWORD    "Password1"   // ← fill in
 
+extern bool is_mesh_connected;
+
 
 /* ─────────────────────────────────────────────
    PACKET TYPES
@@ -80,6 +82,7 @@ typedef enum {
 
 typedef enum{
     CFG_TYPE_THRESHOLD = 0x01,
+    CFG_TYPE_ALERT     = 0x02,
 }config_type_t;
 
 /* ─────────────────────────────────────────────
@@ -185,6 +188,11 @@ typedef struct {
     uint8_t type;
     uint8_t temp_max;
     uint8_t smoke_max;
+       // alert fields — only used when type == CFG_TYPE_ALERT
+    uint8_t alert_flags;   // 0x01=temp, 0x02=smoke, 0x03=both
+    float   temp_val;      // actual reading
+    float   smoke_val;
+    uint8_t src_mac[6];    // which node triggered
 } sensor_cfg_t;
 
 

@@ -120,6 +120,28 @@ void mqtt_publish_node_status(const node_status_t *info)
     ESP_LOGI(TAG, "Status → %s : %s", topic, payload);
 }
 
+
+void mqtt_publish_alert(const uint8_t *mac, float temp, float smoke, uint8_t alert)
+{
+    if (!s_connected) return;
+
+    char topic[48];
+    snprintf(topic, sizeof(topic),
+             "mesh/alert/%02X%02X%02X%02X%02X%02X",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+
+    char payload[128];
+    snprintf(payload, sizeof(payload),
+             "{\"temp\":%.1f,\"smoke\":%.1f,\"temp_alert\":%s,\"smoke_alert\":%s}",
+             temp, smoke,
+             (alert & 0x01) ? "true" : "false",
+             (alert & 0x02) ? "true" : "false");
+
+    // retain=0 — alerts should not persist
+    esp_mqtt_client_publish(s_client, topic, payload, 0, 1, 0);
+    ESP_LOGW("MQTT", "Alert published → %s : %s", topic, payload);
+}
+
 void send_mesh_config(uint8_t temp, uint8_t smoke)
 {
     sensor_cfg_t cfg = {
