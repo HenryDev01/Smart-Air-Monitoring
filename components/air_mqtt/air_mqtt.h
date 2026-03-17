@@ -14,7 +14,7 @@ typedef struct {
 } node_status_t;
 
 esp_err_t mqtt_init(void);
-void mqtt_publish_sensor(const uint8_t *mac, float temp, float smoke, float etx, uint8_t hops);
+void mqtt_publish_sensor(const uint8_t *mac, float temp,float humidity, float smoke, float etx, uint8_t hops);
 void mqtt_publish_node_status(const node_status_t *info);
-
-void  send_mesh_config(uint8_t temp_max, uint8_t smoke_max);
+void mqtt_publish_alert(const uint8_t *mac, float temp, float smoke, uint8_t alert); 
+void send_mesh_config(uint8_t temp_max, uint8_t smoke_max);

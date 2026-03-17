@@ -6,6 +6,7 @@
 #include "../configuration/air_mesh.h"
 #include "../mesh/flooding/mesh_gossip.h"
 #include <stdio.h>
+#include "esp_mac.h"
 
 static const char *TAG = "MQTT";
 static esp_mqtt_client_handle_t s_client = NULL;
@@ -17,7 +18,7 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
     esp_mqtt_event_handle_t event = event_data;
     switch (event->event_id) {
         case MQTT_EVENT_CONNECTED:
-            ESP_LOGI(TAG, "MQTT connected ✅");
+            ESP_LOGI(TAG, "MQTT connected");
             s_connected = true;
             esp_mqtt_client_subscribe(s_client, "mesh/config/all/threshold", 1);
             esp_mqtt_client_subscribe(s_client, "mesh/config/+/threshold", 1);
@@ -62,7 +63,7 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
     }
 }
 
-void mqtt_publish_sensor(const uint8_t *mac, float temp, float smoke,
+void mqtt_publish_sensor(const uint8_t *mac, float temp,float humidity, float smoke,
                          float etx, uint8_t hops)
 {
     if (!s_connected) {
@@ -79,8 +80,8 @@ void mqtt_publish_sensor(const uint8_t *mac, float temp, float smoke,
     // payload: JSON
     char payload[128];
     snprintf(payload, sizeof(payload),
-             "{\"temp\":%.1f,\"smoke\":%.1f,\"etx\":%.2f,\"hops\":%d}",
-             temp, smoke, etx, hops);
+             "{\"temp\":%.1f, \"humidity\":%.1f, \"smoke\":%.1f,\"etx\":%.2f,\"hops\":%d}",
+             temp, humidity, smoke, etx, hops);
 
     esp_mqtt_client_publish(s_client, topic, payload, 0, 1, 0);
     ESP_LOGI(TAG, "Published → %s : %s", topic, payload);
@@ -120,6 +121,28 @@ void mqtt_publish_node_status(const node_status_t *info)
     ESP_LOGI(TAG, "Status → %s : %s", topic, payload);
 }
 
+
+void mqtt_publish_alert(const uint8_t *mac, float temp, float smoke, uint8_t alert)
+{
+    if (!s_connected) return;
+
+    char topic[48];
+    snprintf(topic, sizeof(topic),
+             "mesh/alert/%02X%02X%02X%02X%02X%02X",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+
+    char payload[128];
+    snprintf(payload, sizeof(payload),
+             "{\"temp\":%.1f,\"smoke\":%.1f,\"temp_alert\":%s,\"smoke_alert\":%s}",
+             temp, smoke,
+             (alert & 0x01) ? "true" : "false",
+             (alert & 0x02) ? "true" : "false");
+
+    // retain=0 — alerts should not persist
+    esp_mqtt_client_publish(s_client, topic, payload, 0, 1, 0);
+    ESP_LOGW("MQTT", "Alert published → %s : %s", topic, payload);
+}
+
 void send_mesh_config(uint8_t temp, uint8_t smoke)
 {
     sensor_cfg_t cfg = {
@@ -133,13 +156,20 @@ void send_mesh_config(uint8_t temp, uint8_t smoke)
 
 esp_err_t mqtt_init(void)
 {
-        esp_mqtt_client_config_t cfg = {
+    // Generate unique client ID from MAC
+    char client_id[32];
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    snprintf(client_id, sizeof(client_id), "esp32-%02X%02X%02X",
+             mac[3], mac[4], mac[5]);
+
+    esp_mqtt_client_config_t cfg = {
         .broker.address.uri = MQTT_BROKER_URL,
         .broker.verification.crt_bundle_attach = esp_crt_bundle_attach,
-        .credentials.client_id = "esp32-root-01",
+        .credentials.client_id = client_id,          
         .credentials.username = MQTT_USERNAME,
         .credentials.authentication.password = MQTT_PASSWORD,
-        .session.keepalive = 60,
+        .session.keepalive = 120,                     // changed from 60
         .network.reconnect_timeout_ms = 5000,
         .network.timeout_ms = 10000,
     };
