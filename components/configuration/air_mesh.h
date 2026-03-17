@@ -12,13 +12,13 @@
 /* ─────────────────────────────────────────────
    MESH CONFIGURATION
    ───────────────────────────────────────────── */
-#define MESH_ID              {0xAB, 0x72, 0x4D, 0x6F, 0x6E, 0x00}  // "AirMon"
+#define MESH_ID              {0xAC, 0x72, 0x4D, 0x6F, 0x6E, 0x00}  // "AirMon"
 #define MESH_PASSWORD        "AirMonitor2024!"
 #define MESH_CHANNEL         6
 #define MESH_MAX_LAYERS      6
 #define MESH_AP_MAX_CONN     6
-#define MESH_ROUTER_SSID      "Boey"
-#define MESH_ROUTER_PASSWORD  "Boey!23456789"
+#define MESH_ROUTER_SSID      "HanSheng"
+#define MESH_ROUTER_PASSWORD  "fk8wzaVans"
 #define MESH_GROUP_ID        {0x01,0x00,0x00,0x00,0x00,0x01}  // for group messages
 
 /* ─────────────────────────────────────────────
@@ -100,7 +100,7 @@ typedef struct __attribute__((packed)) {
 typedef struct __attribute__((packed)) {
     pkt_hdr_t  hdr;
     float      temperature;
-    float      humidity;            
+    float      humidity;
     float      smoke;       
     uint8_t    hop_count;
     float      etx_to_root;

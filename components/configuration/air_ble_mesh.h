@@ -30,6 +30,7 @@ Tempaory hardcoded key for provisioning
 typedef struct __attribute__((packed)) {
     uint8_t src_mac[6];
     float   temperature;
+    float   humidity;
     float   smoke;
     uint8_t battery_pct;
 } ble_sensor_payload_t;
