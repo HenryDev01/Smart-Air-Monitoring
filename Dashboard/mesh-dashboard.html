@@ -201,6 +201,7 @@ function handleMessage(topic, data) {
     const mac = formatMac(sensorMatch[1]);
     if (!nodes[mac]) nodes[mac] = { mac, status: 'online', layer: '?', parent: '?', rssi: 0, authenticated: false };
     nodes[mac].temp      = data.temp;
+    nodes[mac].humidity  = data.humidity;
     nodes[mac].smoke     = data.smoke;
     nodes[mac].etx       = data.etx;
     nodes[mac].hops      = data.hops;
@@ -316,6 +317,10 @@ function renderCards() {
           <div class="sensor-box">
             <div class="sensor-label">Temperature</div>
             <div class="sensor-value ${tempClass}">${tempVal}<span class="sensor-unit">°C</span></div>
+          </div>
+          <div class="sensor-box">
+            <div class="sensor-label">Humidity</div>
+            <div class="sensor-value">${n.humidity !== undefined ? n.humidity.toFixed(1) : '--'}<span class="sensor-unit">%</span></div>
           </div>
           <div class="sensor-box">
             <div class="sensor-label">Smoke</div>

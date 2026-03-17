@@ -15,9 +15,6 @@
 
 static const char *TAG = "m5stick";
 
-
-
-
 void app_main(void)
 {   
     bool is_wifi_Connected = false;
@@ -26,16 +23,23 @@ void app_main(void)
     esp_read_mac(self_mac, ESP_MAC_WIFI_STA);
     snprintf(mac_str, sizeof(mac_str), "MAC: " MACSTR, MAC2STR(self_mac));
 
-    // for testing/filtering
-    if (self_mac[5] == 0x98) {
-        is_wifi_Connected = true;
-    }
+    // // for testing/filtering
+    // if (self_mac[5] == 0x98) {
+    //     is_wifi_Connected = true;
+    // }
+
+    static const uint8_t BRIDGE_WIFI_MAC[6] = {0xac, 0x0b, 0xfb, 0x6f, 0x9c, 0x04};
+    is_wifi_Connected = (memcmp(self_mac, BRIDGE_WIFI_MAC, 6) == 0);
 
 
     ESP_LOGI(TAG, "╔══════════════════════════════════╗");
     ESP_LOGI(TAG, "║  Air Quality Mesh Monitor        ║");
     ESP_LOGI(TAG, "║  ESP-IDF %s", esp_get_idf_version());
     ESP_LOGI(TAG, "╚══════════════════════════════════╝");
+
+    ESP_LOGI(TAG, "MAC: " MACSTR " → role: %s",
+         MAC2STR(self_mac),
+         is_wifi_Connected ? "BRIDGE (WiFi+BLE)" : "BLE NODE");
 
     // display on lcd causing overflow
 
@@ -71,7 +75,7 @@ void app_main(void)
 
 
 
-    vTaskDelay(pdMS_TO_TICKS(100000));
+    vTaskDelay(pdMS_TO_TICKS(3000)); // wait for WiFi to connect (if provisioned)
     if(is_wifi_Connected)
     {
         esp_err_t ble_err = ble_bridge_init();
