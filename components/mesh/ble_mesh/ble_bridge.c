@@ -1,284 +1,611 @@
+/*
+ * ble_bridge.c
+ * ─────────────
+ * ESP32 bridge = BLE Mesh PROVISIONER + WiFi Mesh NODE
+ *
+ * - Auto-provisions any M5StickC that advertises an unprovisioned beacon
+ * - Receives OP_SENSOR_DATA from provisioned M5StickC nodes via BLE mesh
+ * - Forwards received data upstream through WiFi mesh toward root
+ * - Periodically sends OP_BRIDGE_ADVERT so M5StickC nodes know bridge is alive
+ */
+
 #include "ble_bridge.h"
-#include "esp_bt.h"
+
 #include "esp_bt_main.h"
-#include "esp_gap_ble_api.h"
-#include "esp_log.h"
+#include "esp_ble_mesh_defs.h"
+#include "esp_ble_mesh_common_api.h"
+#include "esp_ble_mesh_networking_api.h"
+#include "esp_ble_mesh_provisioning_api.h"
+#include "esp_ble_mesh_config_model_api.h"
+#include "esp_ble_mesh_local_data_operation_api.h"
+#include "esp_coexist.h"
+#include "esp_bt.h"
 #include "esp_mac.h"
 #include "esp_mesh.h"
-#include "esp_coexist.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
+#include "esp_wifi.h"
+#include "esp_random.h"
+#include "esp_log.h"
+
+#include "../../configuration/air_ble_mesh.h"
 #include "../../configuration/air_mesh.h"
-#include <string.h>
 
 static const char *TAG = "BLE_BRIDGE";
 
-/* ── Identity ─────────────────────────────────────────────── */
-// WiFi STA MAC of the node that acts as bridge/scanner
-// Change this to match whichever M5Stick is your "root" side
-static const uint8_t BRIDGE_MAC[6] = {0xe8, 0x9f, 0x6d, 0x0a, 0x45, 0x9c};
+//#define BRIDGE_ADVERT_MS  5000
+#define ADVERT_TASK_STACK 2048
+#define MAX_RETRIES       5
+#define RETRY_DELAY_MS    2000
 
-#define OUR_COMPANY_ID  0x02E5
-#define ADV_TYPE_SENSOR 0xAB
-#define ADV_MAGIC_0  0xA1
-#define ADV_MAGIC_1  0xB2
+/* ── State ───────────────────────────────────────────────── */
+static uint8_t  s_dev_uuid[16] = {0};
+static uint8_t  s_my_mac[6]    = {0};
+static uint8_t  s_bridge_load  = 0;
+static uint32_t s_fwd_seq      = 0;
 
-typedef struct __attribute__((packed)) {
-    uint16_t company_id;
-    uint8_t  pkt_type;
-    uint8_t  mac[6];
-    uint8_t  magic_0;    
-    uint8_t  magic_1;   
-    float    temp;
-    float    hum;
-    float    smoke;
-} ble_sensor_adv_t;
-
-/* ── State ────────────────────────────────────────────────── */
-static bool     s_bt_ready       = false;
-static bool     s_is_bridge      = false;
-static bool     s_is_advertising = false;
-static bool     s_is_scanning    = false;
-static uint8_t  s_my_mac[6]      = {0};
-
-/* ── GAP callback ─────────────────────────────────────────── */
-static void gap_cb(esp_gap_ble_cb_event_t event,
-                   esp_ble_gap_cb_param_t *param)
+static inline bool wifi_mesh_up(void)
 {
-    switch (event) {
+    return is_mesh_connected || esp_mesh_is_root();
+}
 
-    case ESP_GAP_BLE_ADV_DATA_RAW_SET_COMPLETE_EVT: {
-        // Data is set, now start advertising
-        esp_ble_adv_params_t adv_params = {
-            .adv_int_min       = 0x20,
-            .adv_int_max       = 0x40,
-            .adv_type          = ADV_TYPE_NONCONN_IND,
-            .own_addr_type     = BLE_ADDR_TYPE_PUBLIC,
-            .channel_map       = ADV_CHNL_ALL,
-            .adv_filter_policy = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY,
-        };
-        esp_ble_gap_start_advertising(&adv_params);
-        break;
+/* ── Config state machine ────────────────────────────────── */
+typedef enum {
+    CFG_STATE_APPKEY,
+    CFG_STATE_MODELBIND,
+    CFG_STATE_DONE,
+} cfg_state_t;
+
+typedef struct {
+    uint16_t    addr;
+    cfg_state_t state;
+    uint8_t     retries;
+} cfg_job_t;
+
+typedef struct {
+    uint16_t addr;
+    uint32_t opcode;
+    bool     success;
+} cfg_result_t;
+
+static QueueHandle_t s_cfg_queue  = NULL;
+static QueueHandle_t s_cfg_result = NULL;
+
+/* ── Vendor message queue ────────────────────────────────── */
+/* One flat struct covers every outbound vendor message.
+   data[] holds the raw payload; len says how many bytes.
+   Largest payload is ble_bridge_advert_t — that sets the buffer size. */
+#define VMSG_DATA_MAX  sizeof(ble_bridge_advert_t)
+
+typedef struct {
+    uint32_t               opcode;
+    esp_ble_mesh_msg_ctx_t ctx;
+    uint16_t               len;
+    uint8_t                data[VMSG_DATA_MAX];
+} vmsg_t;
+
+static QueueHandle_t s_msg_queue = NULL;
+
+/* ── Prov struct — provisioner, fixed addr ───────────────── */
+static esp_ble_mesh_prov_t s_prov = {
+    .uuid               = s_dev_uuid,
+    .output_size        = 0,
+    .output_actions     = 0,
+    .input_size         = 0,
+    .prov_unicast_addr  = 0x0001,   /* bridge's own BLE mesh address */
+    .prov_start_address = 0x0005,   /* first address assigned to M5StickC nodes */
+};
+
+/* ── Composition ─────────────────────────────────────────── */
+static esp_ble_mesh_cfg_srv_t s_cfg_srv = {
+    .relay            = ESP_BLE_MESH_RELAY_ENABLED,
+    .beacon           = ESP_BLE_MESH_BEACON_ENABLED,
+    .friend_state     = ESP_BLE_MESH_FRIEND_ENABLED,
+    .gatt_proxy       = ESP_BLE_MESH_GATT_PROXY_ENABLED,
+    .default_ttl      = 7,
+    .net_transmit     = ESP_BLE_MESH_TRANSMIT(2, 20),
+    .relay_retransmit = ESP_BLE_MESH_TRANSMIT(2, 20),
+};
+
+static esp_ble_mesh_client_t s_cfg_client;
+
+static esp_ble_mesh_model_op_t s_vnd_ops[] = {
+    ESP_BLE_MESH_MODEL_OP(OP_SENSOR_DATA,   sizeof(ble_sensor_payload_t)),
+    ESP_BLE_MESH_MODEL_OP(OP_BRIDGE_SELECT, sizeof(ble_bridge_select_t)),
+    ESP_BLE_MESH_MODEL_OP_END,
+};
+
+ESP_BLE_MESH_MODEL_PUB_DEFINE(s_vnd_pub, 2 + sizeof(ble_bridge_advert_t), ROLE_PROVISIONER);
+
+static esp_ble_mesh_model_t s_root_models[] = {
+    ESP_BLE_MESH_MODEL_CFG_SRV(&s_cfg_srv),
+    ESP_BLE_MESH_MODEL_CFG_CLI(&s_cfg_client),
+};
+static esp_ble_mesh_model_t s_vnd_models[] = {
+    ESP_BLE_MESH_VENDOR_MODEL(CID_ESP, VENDOR_MODEL_ID,
+                              s_vnd_ops, &s_vnd_pub, NULL),
+};
+static esp_ble_mesh_elem_t s_elements[] = {
+    ESP_BLE_MESH_ELEMENT(0, s_root_models, s_vnd_models),
+};
+static esp_ble_mesh_comp_t s_comp = {
+    .cid = CID_ESP, .pid = 0x0003, .vid = 0x0001,
+    .element_count = ARRAY_SIZE(s_elements),
+    .elements      = s_elements,
+};
+
+/* ═══════════════════════════════════════════════════════════
+   FORWARD BLE SENSOR DATA → WIFI MESH → ROOT
+   ═══════════════════════════════════════════════════════════ */
+static void forward_to_wifi_mesh(const ble_sensor_payload_t *ble)
+{
+    if (!wifi_mesh_up()) {
+        ESP_LOGW(TAG, "WiFi mesh not up — cannot forward, dropping packet");
+        return;
     }
 
-    case ESP_GAP_BLE_ADV_START_COMPLETE_EVT:
-        if (param->adv_start_cmpl.status == ESP_BT_STATUS_SUCCESS) {
-            s_is_advertising = true;
-            ESP_LOGI(TAG, "BLE advertising started");
-        } else {
-            ESP_LOGE(TAG, "BLE adv start failed: %d",
-                     param->adv_start_cmpl.status);
-        }
-        break;
+    pkt_sensor_t pkt = {
+        .hdr         = { .type = PKT_SENSOR_DATA, .seq = s_fwd_seq++ },
+        .temperature = ble->temperature,
+        .humidity    = ble->humidity,
+        .smoke       = ble->smoke,
+        .hop_count   = (uint8_t)(esp_mesh_get_layer() + 1),
+        .etx_to_root = 1.0f,
+    };
+    memcpy(pkt.hdr.src_id, ble->src_mac, 6);
 
-    case ESP_GAP_BLE_ADV_STOP_COMPLETE_EVT:
-        s_is_advertising = false;
-        ESP_LOGI(TAG, "BLE advertising stopped");
-        break;
+    mesh_data_t tx = {
+        .data  = (uint8_t *)&pkt,
+        .size  = sizeof(pkt),
+        .proto = MESH_PROTO_BIN,
+        .tos   = MESH_TOS_P2P,
+    };
 
-    case ESP_GAP_BLE_SCAN_PARAM_SET_COMPLETE_EVT:
-        esp_ble_gap_start_scanning(0); // 0 = scan forever
-        break;
+    esp_err_t err = esp_mesh_send(NULL, &tx, MESH_DATA_TODS, NULL, 0);
+    /* No float formatting inside BLE callback — dtoa can assert on small stack */
+    ESP_LOGI(TAG, "BLE→WiFi " MACSTR " T=%d.%d H=%d.%d smoke=%d.%d batt=%u%%: %s",
+         MAC2STR(ble->src_mac),
+         (int)ble->temperature, (int)((ble->temperature - (int)ble->temperature) * 10),
+         (int)ble->humidity,    (int)((ble->humidity    - (int)ble->humidity)    * 10),
+         (int)ble->smoke,       (int)((ble->smoke       - (int)ble->smoke)       * 10),
+         ble->battery_pct,
+         esp_err_to_name(err));
+}
 
-    case ESP_GAP_BLE_SCAN_START_COMPLETE_EVT:
-        if (param->scan_start_cmpl.status == ESP_BT_STATUS_SUCCESS) {
-            s_is_scanning = true;
-            ESP_LOGI(TAG, "BLE scanning started — watching for sensor nodes");
-        }
-        break;
+/* ═══════════════════════════════════════════════════════════
+   SEND APPKEY TO NEWLY PROVISIONED NODE
+   Never call from a BLE stack callback.
+   ═══════════════════════════════════════════════════════════ */
+static void send_appkey_to_node(uint16_t addr)
+{
+    uint8_t app_key[16] = PROV_APP_KEY;
 
-    case ESP_GAP_BLE_SCAN_STOP_COMPLETE_EVT:
-        s_is_scanning = false;
-        ESP_LOGI(TAG, "BLE scanning stopped");
-        break;
+    esp_ble_mesh_cfg_client_set_state_t set = {0};
+    set.app_key_add.net_idx = PROV_NET_IDX;
+    set.app_key_add.app_idx = PROV_APP_IDX;
+    memcpy(set.app_key_add.app_key, app_key, 16);
 
-    case ESP_GAP_BLE_SCAN_RESULT_EVT: {
-        if (param->scan_rst.search_evt != ESP_GAP_SEARCH_INQ_RES_EVT) break;
+    esp_ble_mesh_client_common_param_t common = {
+        .opcode       = ESP_BLE_MESH_MODEL_OP_APP_KEY_ADD,
+        .model        = &s_root_models[1],
+        .ctx.net_idx  = PROV_NET_IDX,
+        .ctx.app_idx  = 0,
+        .ctx.addr     = addr,
+        .ctx.send_ttl = 3,
+        .msg_timeout  = 10000,
+    };
+    esp_err_t e = esp_ble_mesh_config_client_set_state(&common, &set);
+    ESP_LOGI(TAG, "AppKey → 0x%04x: %s", addr, esp_err_to_name(e));
+}
 
-        uint8_t *adv     = param->scan_rst.ble_adv;
-        uint8_t  adv_len = param->scan_rst.adv_data_len;
-        uint8_t i = 0;
-        
-        while (i + 1 < adv_len) {
-            uint8_t len  = adv[i];
-            if (len == 0 || i + len >= adv_len) break;
-            uint8_t type = adv[i + 1];
+/* ═══════════════════════════════════════════════════════════
+   BIND VENDOR MODEL APPKEY ON NODE
+   Never call from a BLE stack callback.
+   ═══════════════════════════════════════════════════════════ */
+static void send_model_bind_to_node(uint16_t addr)
+{
+    esp_ble_mesh_cfg_client_set_state_t set = {0};
+    set.model_app_bind.element_addr  = addr;
+    set.model_app_bind.model_app_idx = PROV_APP_IDX;
+    set.model_app_bind.model_id      = VENDOR_MODEL_ID;
+    set.model_app_bind.company_id    = CID_ESP;
 
-            if (type == 0xFF && len >= sizeof(ble_sensor_adv_t)) {
-                ble_sensor_adv_t *pkt = (ble_sensor_adv_t *)&adv[i + 2];
+    esp_ble_mesh_client_common_param_t common = {
+        .opcode       = ESP_BLE_MESH_MODEL_OP_MODEL_APP_BIND,
+        .model        = &s_root_models[1],
+        .ctx.net_idx  = PROV_NET_IDX,
+        .ctx.app_idx  = 0,
+        .ctx.addr     = addr,
+        .ctx.send_ttl = 3,
+        .msg_timeout  = 10000,
+    };
+    esp_err_t e = esp_ble_mesh_config_client_set_state(&common, &set);
+    ESP_LOGI(TAG, "Model bind → 0x%04x: %s", addr, esp_err_to_name(e));
+}
 
-                if (pkt->company_id != OUR_COMPANY_ID ||
-                    pkt->pkt_type   != ADV_TYPE_SENSOR ||
-                    pkt->magic_0    != ADV_MAGIC_0     ||
-                    pkt->magic_1    != ADV_MAGIC_1) {
-                    i += len + 1;
-                    continue;
-                }
-                ESP_LOGI(TAG, "BLE sensor from " MACSTR
-                    " | T:%.1f H:%.1f S:%.1f",
-                    MAC2STR(pkt->mac),
-                    pkt->temp, pkt->hum, pkt->smoke);
+/* ═══════════════════════════════════════════════════════════
+   VENDOR MESSAGE TASK
+   Dequeues vendor messages one by one and calls
+   esp_ble_mesh_server_model_send_msg from task context —
+   never from inside a BLE stack callback.
+   ═══════════════════════════════════════════════════════════ */
+static void vendor_msg_task(void *arg)
+{
+    vmsg_t msg;
+    while (1) {
+        if (xQueueReceive(s_msg_queue, &msg, portMAX_DELAY) != pdTRUE)
+            continue;
 
-                mesh_addr_t parent;
-                bool wifi_up = (esp_mesh_get_parent_bssid(&parent) == ESP_OK
-                               && parent.addr[0] != 0);
-                if (wifi_up) {
-                    pkt_sensor_t mesh_pkt = {
-                        .hdr         = { .type = PKT_SENSOR_DATA },
-                        .temperature = pkt->temp,
-                        .smoke       = pkt->smoke,
-                        .hop_count   = 1,
-                        .etx_to_root = 1.0f,
-                    };
-                    memcpy(mesh_pkt.hdr.src_id, pkt->mac, 6);
+        esp_err_t e = esp_ble_mesh_server_model_send_msg(
+            &s_vnd_models[0], &msg.ctx,
+            msg.opcode, msg.len, msg.data);
 
+        if (e != ESP_OK)
+            ESP_LOGW(TAG, "vendor send op=0x%06"PRIx32" err=%s",
+                     msg.opcode, esp_err_to_name(e));
+    }
+}
 
-                mesh_data_t tx = {
-                        .data  = (uint8_t *)&mesh_pkt,
-                        .size  = sizeof(mesh_pkt),
-                        .proto = MESH_PROTO_BIN,
-                        .tos   = MESH_TOS_P2P,
-                    };
-                    esp_err_t err = esp_mesh_send(NULL, &tx,
-                                                  MESH_DATA_TODS, NULL, 0);
-                    ESP_LOGI(TAG, "Forwarded to WiFi mesh: %s",
-                             esp_err_to_name(err));
-                }
+/* ═══════════════════════════════════════════════════════════
+   CONFIG NODE TASK — state machine with retry
+   Single persistent task. Serialises all post-prov config work
+   so we never send segmented messages from inside a callback.
+   ═══════════════════════════════════════════════════════════ */
+static void config_node_task(void *arg)
+{
+    cfg_job_t job;
+
+    while (1) {
+        if (xQueueReceive(s_cfg_queue, &job, portMAX_DELAY) != pdTRUE)
+            continue;
+
+        ESP_LOGI(TAG, "Config job: addr=0x%04x state=%d", job.addr, job.state);
+
+        while (job.state != CFG_STATE_DONE && job.retries < MAX_RETRIES) {
+
+            if (job.state == CFG_STATE_APPKEY)
+                send_appkey_to_node(job.addr);
+            else if (job.state == CFG_STATE_MODELBIND)
+                send_model_bind_to_node(job.addr);
+
+            /* Wait for config_client_cb to post the result.
+               Timeout is slightly longer than msg_timeout (10 s). */
+            cfg_result_t result;
+            if (xQueueReceive(s_cfg_result, &result, pdMS_TO_TICKS(12000)) != pdTRUE) {
+                job.retries++;
+                ESP_LOGW(TAG, "No result for 0x%04x state=%d retry=%d/%d",
+                         job.addr, job.state, job.retries, MAX_RETRIES);
+                vTaskDelay(pdMS_TO_TICKS(RETRY_DELAY_MS));
+                continue;
             }
-            i += len + 1;
+
+            /* Result may be for a different addr if two nodes provision
+               simultaneously — put it back and wait again. */
+            if (result.addr != job.addr) {
+                xQueueSend(s_cfg_result, &result, 0);
+                vTaskDelay(pdMS_TO_TICKS(100));
+                continue;
+            }
+
+            if (!result.success) {
+                job.retries++;
+                ESP_LOGW(TAG, "Config failed 0x%04x state=%d retry=%d/%d",
+                         job.addr, job.state, job.retries, MAX_RETRIES);
+                vTaskDelay(pdMS_TO_TICKS(RETRY_DELAY_MS));
+                continue;
+            }
+
+            /* Advance state on success */
+            if (job.state == CFG_STATE_APPKEY) {
+                ESP_LOGI(TAG, "AppKey OK 0x%04x -> binding model", job.addr);
+                job.state   = CFG_STATE_MODELBIND;
+                job.retries = 0;
+            } else if (job.state == CFG_STATE_MODELBIND) {
+                ESP_LOGI(TAG, "Node 0x%04x fully configured", job.addr);
+                job.state = CFG_STATE_DONE;
+            }
+
+            vTaskDelay(pdMS_TO_TICKS(300));
         }
-        break;
+
+        if (job.retries >= MAX_RETRIES)
+            ESP_LOGE(TAG, "Giving up on 0x%04x after %d retries",
+                     job.addr, MAX_RETRIES);
     }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   CONFIG CLIENT CALLBACK
+   Only posts results to the queue — never sends from here.
+   ═══════════════════════════════════════════════════════════ */
+static void config_client_cb(esp_ble_mesh_cfg_client_cb_event_t event,
+                              esp_ble_mesh_cfg_client_cb_param_t *param)
+{
+    if (!s_cfg_result) return;
+
+    uint16_t addr   = param->params->ctx.addr;
+    uint32_t opcode = param->params->opcode;
+
+    cfg_result_t result = {
+        .addr    = addr,
+        .opcode  = opcode,
+        .success = false,
+    };
+
+    switch (event) {
+    case ESP_BLE_MESH_CFG_CLIENT_SET_STATE_EVT:
+        result.success = (param->error_code == 0);
+        ESP_LOGI(TAG, "Config result addr=0x%04x op=0x%04"PRIx32" ok=%d",
+                 addr, opcode, result.success);
+        xQueueSend(s_cfg_result, &result, 0);
+        break;
+
+    case ESP_BLE_MESH_CFG_CLIENT_TIMEOUT_EVT:
+        result.success = false;
+        ESP_LOGW(TAG, "Config timeout addr=0x%04x op=0x%04"PRIx32, addr, opcode);
+        xQueueSend(s_cfg_result, &result, 0);
+        break;
+
     default:
         break;
     }
 }
 
-/* ── BT stack init ────────────────────────────────────────── */
-static esp_err_t bt_init(void)
+/* ═══════════════════════════════════════════════════════════
+   VENDOR MODEL CALLBACK
+   Only enqueues work — never sends directly.
+   ═══════════════════════════════════════════════════════════ */
+static void model_cb(esp_ble_mesh_model_cb_event_t event,
+                     esp_ble_mesh_model_cb_param_t *param)
 {
-    esp_err_t ret;
+    if (event != ESP_BLE_MESH_MODEL_OPERATION_EVT) return;
 
-    // Free classic BT memory since we only use BLE
-    ret = esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
-    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(TAG, "mem_release: %s", esp_err_to_name(ret));
+    uint32_t opcode = param->model_operation.opcode;
+    uint16_t len    = param->model_operation.length;
+    uint8_t *msg    = param->model_operation.msg;
+
+    /* Deep-copy ctx — pointer is only valid during this callback */
+    esp_ble_mesh_msg_ctx_t ctx;
+    memcpy(&ctx, param->model_operation.ctx, sizeof(ctx));
+
+    switch (opcode) {
+
+    case OP_SENSOR_DATA: {
+        if (len < sizeof(ble_sensor_payload_t)) {
+            ESP_LOGW(TAG, "Short payload (%u B)", len); break;
+        }
+        const ble_sensor_payload_t *p = (const ble_sensor_payload_t *)msg;
+
+        forward_to_wifi_mesh(p);
+
+        /* Enqueue ACK — never send from inside a BLE stack callback */
+        uint8_t ack = wifi_mesh_up() ? 0x01 : 0x00;
+        vmsg_t vmsg = {
+            .opcode = OP_SENSOR_ACK,
+            .ctx    = ctx,
+            .len    = sizeof(ack),
+        };
+        vmsg.data[0] = ack;
+        if (xQueueSend(s_msg_queue, &vmsg, 0) != pdTRUE)
+            ESP_LOGW(TAG, "msg_queue full — ACK dropped");
+        break;
     }
 
-    esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
-    ret = esp_bt_controller_init(&bt_cfg);
-    if (ret) { ESP_LOGE(TAG, "bt_controller_init: %s", esp_err_to_name(ret)); return ret; }
+    case OP_BRIDGE_SELECT: {
+        if (len < sizeof(ble_bridge_select_t)) break;
+        const ble_bridge_select_t *sel = (const ble_bridge_select_t *)msg;
+        if (sel->selected) s_bridge_load++;
+        else if (s_bridge_load > 0) s_bridge_load--;
+        ESP_LOGI(TAG, "%s by " MACSTR " (load=%u)",
+                 sel->selected ? "Selected" : "Deselected",
+                 MAC2STR(sel->sensor_mac), s_bridge_load);
+        break;
+    }
 
-    ret = esp_bt_controller_enable(ESP_BT_MODE_BLE);
-    if (ret) { ESP_LOGE(TAG, "bt_controller_enable: %s", esp_err_to_name(ret)); return ret; }
-
-    ret = esp_bluedroid_init();
-    if (ret) { ESP_LOGE(TAG, "bluedroid_init: %s", esp_err_to_name(ret)); return ret; }
-
-    ret = esp_bluedroid_enable();
-    if (ret) { ESP_LOGE(TAG, "bluedroid_enable: %s", esp_err_to_name(ret)); return ret; }
-
-    ESP_LOGI(TAG, "BT stack ready");
-    return ESP_OK;
+    default:
+        ESP_LOGD(TAG, "Unhandled opcode 0x%06"PRIx32, opcode);
+        break;
+    }
 }
 
-/* ── Public API ───────────────────────────────────────────── */
+/* ═══════════════════════════════════════════════════════════
+   PROV CALLBACK
+   ═══════════════════════════════════════════════════════════ */
+static void prov_cb(esp_ble_mesh_prov_cb_event_t event,
+                    esp_ble_mesh_prov_cb_param_t *param)
+{
+    switch (event) {
+    case ESP_BLE_MESH_PROV_REGISTER_COMP_EVT:
+        ESP_LOGI(TAG, "Prov register err=%d", param->prov_register_comp.err_code);
+        break;
+
+    case ESP_BLE_MESH_PROVISIONER_PROV_ENABLE_COMP_EVT:
+        ESP_LOGI(TAG, "Provisioner scanning for M5StickC nodes...");
+        break;
+
+    case ESP_BLE_MESH_PROVISIONER_RECV_UNPROV_ADV_PKT_EVT: {
+        esp_ble_mesh_unprov_dev_add_t add = {0};
+        memcpy(add.addr, param->provisioner_recv_unprov_adv_pkt.addr, 6);
+        add.addr_type = param->provisioner_recv_unprov_adv_pkt.addr_type;
+        memcpy(add.uuid, param->provisioner_recv_unprov_adv_pkt.dev_uuid, 16);
+        add.bearer   = ESP_BLE_MESH_PROV_ADV;
+        add.oob_info = 0;
+        esp_err_t e = esp_ble_mesh_provisioner_add_unprov_dev(&add,
+            ADD_DEV_RM_AFTER_PROV_FLAG |
+            ADD_DEV_START_PROV_NOW_FLAG |
+            ADD_DEV_FLUSHABLE_DEV_FLAG);
+        ESP_LOGI(TAG, "Provisioning " MACSTR ": %s",
+                 MAC2STR(add.addr), esp_err_to_name(e));
+        break;
+    }
+
+    case ESP_BLE_MESH_PROVISIONER_PROV_COMPLETE_EVT: {
+        uint16_t addr = param->provisioner_prov_complete.unicast_addr;
+        ESP_LOGI(TAG, "Provisioned 0x%04x — queuing config job", addr);
+
+        /* Small delay so node can store provisioning keys before we
+           start sending config messages */
+        vTaskDelay(pdMS_TO_TICKS(500));
+
+        cfg_job_t job = {
+            .addr    = addr,
+            .state   = CFG_STATE_APPKEY,
+            .retries = 0,
+        };
+        xQueueSend(s_cfg_queue, &job, 0);
+        break;
+    }
+
+    default:
+        break;
+    }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   BRIDGE ADVERTISEMENT TASK
+   ═══════════════════════════════════════════════════════════ */
+static void send_bridge_advert(void)
+{
+    int8_t rssi = -127;
+    wifi_ap_record_t ap;
+    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) rssi = ap.rssi;
+
+    ble_bridge_advert_t advert = {
+        .wifi_connected = wifi_mesh_up() ? 1 : 0,
+        .wifi_layer     = (uint8_t)esp_mesh_get_layer(),
+        .load           = s_bridge_load,
+        .rssi_to_root   = rssi,
+    };
+    memcpy(advert.bridge_mac, s_my_mac, 6);
+
+    vmsg_t vmsg = {
+        .opcode = OP_BRIDGE_ADVERT,
+        .ctx    = {
+            .net_idx  = PROV_NET_IDX,
+            .app_idx  = PROV_APP_IDX,
+            .addr     = GROUP_BRIDGE_ADVERT,
+            .send_ttl = 3,
+        },
+        .len = sizeof(advert),
+    };
+    memcpy(vmsg.data, &advert, sizeof(advert));
+
+    if (xQueueSend(s_msg_queue, &vmsg, 0) != pdTRUE)
+        ESP_LOGW(TAG, "msg_queue full — advert dropped");
+    else
+        ESP_LOGD(TAG, "Advert queued: wifi=%d layer=%d load=%d rssi=%d",
+                 advert.wifi_connected, advert.wifi_layer,
+                 advert.load, rssi);
+}
+
+static void bridge_advert_task(void *arg)
+{
+    vTaskDelay(pdMS_TO_TICKS(500 + (esp_random() % 3000)));
+    while (1) {
+        send_bridge_advert();
+        vTaskDelay(pdMS_TO_TICKS(BRIDGE_ADVERT_MS));
+    }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   PUBLIC QUERIES
+   ═══════════════════════════════════════════════════════════ */
+bool    ble_bridge_is_provisioned(void) { return true; }
+uint8_t ble_bridge_get_load(void)       { return s_bridge_load; }
+
+/* ═══════════════════════════════════════════════════════════
+   PUBLIC: INIT
+   ═══════════════════════════════════════════════════════════ */
 esp_err_t ble_bridge_init(void)
 {
-    esp_read_mac(s_my_mac, ESP_MAC_WIFI_STA);
-    s_is_bridge = (memcmp(s_my_mac, BRIDGE_MAC, 6) == 0);
+    esp_err_t err;
 
-    ESP_LOGI(TAG, "MAC: " MACSTR " → BLE role: %s",
-             MAC2STR(s_my_mac),
-             s_is_bridge ? "SCANNER/BRIDGE" : "ADVERTISER/NODE");
+    ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT));
 
-    // Coexistence
-    esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
-
-    esp_err_t ret = bt_init();
-    if (ret != ESP_OK) return ret;
-
-    ESP_ERROR_CHECK(esp_ble_gap_register_callback(gap_cb));
-
-    s_bt_ready = true;
-
-    // Start immediately — don't wait for WiFi mesh events
-    // Bridge node scans, sensor nodes advertise
-    if (s_is_bridge) {
-        ble_bridge_start_scanning();
-    } else {
-        // Start advertising with dummy values — sensor task will update
-        ble_advertise_sensor(0.0f, 0.0f, 0.0f);
+    esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+    err = esp_bt_controller_init(&bt_cfg);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "bt_controller_init: %s", esp_err_to_name(err)); return err;
     }
 
-    return ESP_OK;
-}
+    ESP_ERROR_CHECK(esp_coex_preference_set(ESP_COEX_PREFER_BALANCE));
 
-esp_err_t ble_advertise_sensor(float temp, float hum, float smoke)
-{
-    if (!s_bt_ready) return ESP_ERR_INVALID_STATE;
-
-    ble_sensor_adv_t payload = {
-        .company_id = OUR_COMPANY_ID,
-        .pkt_type   = ADV_TYPE_SENSOR,
-        .magic_0    = ADV_MAGIC_0,    
-        .magic_1    = ADV_MAGIC_1,    
-        .temp       = temp,
-        .hum        = hum,
-        .smoke      = smoke,
-    };
-    memcpy(payload.mac, s_my_mac, 6);
-
-    uint8_t adv_data[31] = {0};
-    uint8_t payload_len  = sizeof(ble_sensor_adv_t);
-    adv_data[0] = payload_len + 1;
-    adv_data[1] = 0xFF;
-    memcpy(&adv_data[2], &payload, payload_len);
-
-    // Stop first if already advertising, then update data
-    if (s_is_advertising) {
-        esp_ble_gap_stop_advertising();
-        vTaskDelay(pdMS_TO_TICKS(20));
+    err = esp_bt_controller_enable(ESP_BT_MODE_BLE);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "bt_controller_enable: %s", esp_err_to_name(err)); return err;
     }
 
-    esp_ble_gap_config_adv_data_raw(adv_data, payload_len + 2);
-    // Advertising starts automatically in GAP_BLE_ADV_DATA_RAW_SET_COMPLETE_EVT
+    err = esp_bluedroid_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "bluedroid_init: %s", esp_err_to_name(err)); return err;
+    }
 
-    ESP_LOGI(TAG, "BLE adv update T:%.1f H:%.1f S:%.1f", temp, hum, smoke);
+    err = esp_bluedroid_enable();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "bluedroid_enable: %s", esp_err_to_name(err)); return err;
+    }
+
+    /* UUID from BT MAC */
+    esp_read_mac(s_my_mac, ESP_MAC_BT);
+    s_dev_uuid[0] = 0xDD; s_dev_uuid[1] = 0xDD;
+    s_dev_uuid[2] = s_my_mac[0]; s_dev_uuid[3] = s_my_mac[1];
+    s_dev_uuid[4] = s_my_mac[2]; s_dev_uuid[5] = s_my_mac[3];
+    s_dev_uuid[6] = s_my_mac[4]; s_dev_uuid[7] = s_my_mac[5];
+
+    ESP_LOGI(TAG, "BT MAC: " MACSTR, MAC2STR(s_my_mac));
+
+    /* Create all queues and tasks before registering callbacks.
+       Keep depths small — vmsg_t is large and each slot costs heap. */
+    s_cfg_queue  = xQueueCreate(4, sizeof(cfg_job_t));
+    s_cfg_result = xQueueCreate(2, sizeof(cfg_result_t));
+    s_msg_queue  = xQueueCreate(4, sizeof(vmsg_t));
+    if (!s_cfg_queue || !s_cfg_result || !s_msg_queue) {
+        ESP_LOGE(TAG, "Failed to create queues");
+        return ESP_ERR_NO_MEM;
+    }
+
+    xTaskCreatePinnedToCore(vendor_msg_task, "vnd_msg",
+        2048, NULL, tskIDLE_PRIORITY + 2, NULL, 1);
+
+    xTaskCreatePinnedToCore(config_node_task, "cfg_node",
+        3072, NULL, tskIDLE_PRIORITY + 3, NULL, 1);
+
+    esp_ble_mesh_register_prov_callback(prov_cb);
+    esp_ble_mesh_register_custom_model_callback(model_cb);
+    esp_ble_mesh_register_config_client_callback(config_client_cb);
+
+    err = esp_ble_mesh_init(&s_prov, &s_comp);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_ble_mesh_init: %s", esp_err_to_name(err)); return err;
+    }
+
+    err = esp_ble_mesh_provisioner_prov_enable(ESP_BLE_MESH_PROV_ADV);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "provisioner_prov_enable: %s", esp_err_to_name(err)); return err;
+    }
+
+    uint8_t net_key[16] = PROV_NET_KEY;
+    err = esp_ble_mesh_provisioner_add_local_net_key(net_key, PROV_NET_IDX);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_ARG) {
+        ESP_LOGE(TAG, "add_net_key: %s", esp_err_to_name(err)); return err;
+    }
+
+    uint8_t app_key[16] = PROV_APP_KEY;
+    err = esp_ble_mesh_provisioner_add_local_app_key(app_key, PROV_NET_IDX, PROV_APP_IDX);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_ARG) {
+        ESP_LOGE(TAG, "add_app_key: %s", esp_err_to_name(err)); return err;
+    }
+
+    err = esp_ble_mesh_provisioner_bind_app_key_to_local_model(
+        s_prov.prov_unicast_addr, PROV_APP_IDX, VENDOR_MODEL_ID, CID_ESP);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "bind local model: %s", esp_err_to_name(err));
+    }
+
+    esp_ble_mesh_model_subscribe_group_addr(
+        s_prov.prov_unicast_addr, CID_ESP, VENDOR_MODEL_ID, GROUP_SENSOR);
+
+    xTaskCreatePinnedToCore(bridge_advert_task, "ble_advert",
+        ADVERT_TASK_STACK, NULL, tskIDLE_PRIORITY + 1, NULL, 1);
+
+    ESP_LOGI(TAG, "BLE bridge READY — provisioner active, forwarding BLE->WiFi");
     return ESP_OK;
 }
-
-void ble_node_start_advertising(void)
-{
-    if (!s_bt_ready || s_is_advertising) return;
-    ble_advertise_sensor(0.0f, 0.0f, 0.0f); // sensor task will update soon
-}
-
-void ble_node_stop_advertising(void)
-{
-    if (!s_bt_ready || !s_is_advertising) return;
-    esp_ble_gap_stop_advertising();
-}
-
-void ble_bridge_start_scanning(void)
-{
-    if (!s_bt_ready || s_is_scanning) return;
-    esp_ble_scan_params_t scan_params = {
-        .scan_type          = BLE_SCAN_TYPE_PASSIVE,
-        .own_addr_type      = BLE_ADDR_TYPE_PUBLIC,
-        .scan_filter_policy = BLE_SCAN_FILTER_ALLOW_ALL,
-        .scan_interval      = 0x50,
-        .scan_window        = 0x30,
-        .scan_duplicate     = BLE_SCAN_DUPLICATE_DISABLE,
-    };
-    esp_ble_gap_set_scan_params(&scan_params);
-    // Scanning starts in GAP_BLE_SCAN_PARAM_SET_COMPLETE_EVT
-}
-
-void ble_bridge_stop_scanning(void)
-{
-    if (!s_bt_ready || !s_is_scanning) return;
-    esp_ble_gap_stop_scanning();
-}
-
-bool ble_bridge_is_scanning(void) { return s_is_scanning; }
