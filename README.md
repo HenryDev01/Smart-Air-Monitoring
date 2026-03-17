@@ -89,3 +89,6 @@ TTL=6 with 50ms jitter prevents broadcast storms on a ~50-node mesh.
 - Keys provisioned at manufacturing time
 - Challenge-response prevents replay attacks
 - Session expiry limits window of a compromised key
+
+#10 Mac Address: ac:0b:fb:6f:9c:06
+#76 Mac Address: 4c:75:25:cb:90:8a
