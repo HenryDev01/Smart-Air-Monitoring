@@ -6,8 +6,6 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 
-#include "esp_coexist.h"
-#include "../ble_mesh/ble_bridge.h"
 #include "../../configuration/air_mesh.h"
 #include "../routing/mesh_routing.h"
 #include "../flooding/mesh_gossip.h"
@@ -265,15 +263,21 @@ static void mesh_recv_task(void *arg)
                             MAC2STR(from.addr));
                     break;
                 }
+                
                 pkt_sensor_t *pkt = (pkt_sensor_t *)hdr;
+                // Use src_id from packet — for BLE-forwarded data this is the original BLE node MAC, not the bridge MAC
+                uint8_t *publisher_mac = pkt->hdr.src_id;
                 ESP_LOGI(TAG, "Sensor data from " MACSTR, MAC2STR(from.addr));
+                ESP_LOGI(TAG, "Sensor data from " MACSTR " (via " MACSTR ")", MAC2STR(publisher_mac), MAC2STR(from.addr));
                 ESP_LOGI(TAG, "  Temperature: %.1f°C", pkt->temperature);
+                ESP_LOGI(TAG, "  Humidity: %.1f%%", pkt->humidity);
                 ESP_LOGI(TAG, "  Smoke: %.1f%%", pkt->smoke);
                 ESP_LOGI(TAG, "  ETX to root: %.2f", pkt->etx_to_root);
                 ESP_LOGI(TAG, "  Hop count: %d", pkt->hop_count);
 
                 if (esp_mesh_is_root()) {
-                    mqtt_publish_sensor(from.addr, pkt->temperature, pkt->smoke,
+                    uint8_t *publisher_mac = pkt->hdr.src_id;  // correct for BOTH nodes
+                    mqtt_publish_sensor(from.addr, pkt->temperature, pkt->humidity,  pkt->smoke,
                                         pkt->etx_to_root, pkt->hop_count);
                 }
         
@@ -326,10 +330,6 @@ esp_err_t mesh_init(void)
 {
     esp_err_t ret;
 
-    /* 0. WiFi/BLE coexistence — must be before WiFi and BT init */
-    esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
-    ESP_LOGI(TAG, "Coexistence: BALANCE");
-
     /* 1. NVS */
     ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
@@ -355,7 +355,7 @@ esp_err_t mesh_init(void)
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));// can cause packet not received. will need to test later when implementing power saving
 
 
-    /* 4. Mesh init FIRST, then register handlers */  
+    /* 4. Mesh init FIRST, then register handlers */  // FIX: order matters
     ESP_ERROR_CHECK(esp_mesh_init());
 
     ESP_ERROR_CHECK(esp_event_handler_register(
@@ -397,6 +397,8 @@ esp_err_t mesh_init(void)
     /* 8. Start mesh */
     ESP_ERROR_CHECK(esp_mesh_start());
 
+
+    
     mesh_addr_t group_id = {{0x01,0x00,0x00,0x00,0x00,0x01}};
     esp_mesh_set_group_id(&group_id, 1);
     ESP_LOGI(TAG, "Joined mesh group");
@@ -407,15 +409,6 @@ esp_err_t mesh_init(void)
     /* 9. Receive task */
     xTaskCreatePinnedToCore(mesh_recv_task, "mesh_recv", 4096, NULL,
                             configMAX_PRIORITIES - 1, &s_recv_task_handle, 0);
-    /* 10. BLE mesh — after WiFi mesh is stable */
-    esp_err_t ble_ret = ble_bridge_init();
-    
-    if (ble_ret != ESP_OK) {
-        ESP_LOGE(TAG, "BLE mesh init failed: %s (non-fatal)",
-                 esp_err_to_name(ble_ret));
-    } else {
-        ESP_LOGI(TAG, "BLE mesh init OK");
-    }
 
     return ESP_OK;
 }
