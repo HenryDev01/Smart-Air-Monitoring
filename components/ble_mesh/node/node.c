@@ -26,11 +26,13 @@
 #include "freertos/task.h"
 
 #include "../../configuration/air_ble_mesh.h"
+#include "dht22/DHT22.h"
 
 static const char *TAG = "M5_NODE";
 
 #define SENSOR_PUBLISH_MS  15000
 #define SENSOR_TASK_STACK  4096
+#define DHT22_GPIO  26
 
 /* ── State ───────────────────────────────────────────────── */
 static uint8_t  s_dev_uuid[16] = {0};
@@ -87,12 +89,34 @@ static esp_ble_mesh_comp_t s_comp = {
 /* ═══════════════════════════════════════════════════════════
    READ SENSORS  — replace stubs with real drivers
    ═══════════════════════════════════════════════════════════ */
+static bool s_dht_initialized = false;
+
 static void read_sensors(ble_sensor_payload_t *out)
 {
     memcpy(out->src_mac, s_my_mac, 6);
-    out->temperature = 28.5f;   /* TODO: SHT31 */
-    out->smoke       = 12.0f;   /* TODO: MQ-2  */
-    out->battery_pct = 85;      /* TODO: ADC   */
+
+    if (!s_dht_initialized) {
+        setDHTgpio(DHT22_GPIO);
+        s_dht_initialized = true;
+        ESP_LOGI(TAG, "DHT22 initialized on GPIO%d", DHT22_GPIO);
+    }
+
+    int result = readDHT();
+
+    if (result == DHT_OK) {
+        out->temperature = getTemperature();
+        out->humidity    = getHumidity();
+        ESP_LOGI(TAG, "DHT22: Temp=%.1f°C Humidity=%.1f%%",
+                 out->temperature, out->humidity);
+    } else {
+        errorHandler(result);
+        out->temperature = 25.0f;
+        out->humidity    = 50.0f;
+        ESP_LOGW(TAG, "DHT22 read failed, using fallback values");
+    }
+
+    out->battery_pct = 85;
+    out->smoke       = 12.0f; // TODO: MQ2
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -122,8 +146,8 @@ static void publish_sensor(void)
         OP_SENSOR_DATA,
         sizeof(payload), (uint8_t *)&payload);
 
-    ESP_LOGI(TAG, "Sent T=%.1f smoke=%.1f batt=%u%% → bridge: %s",
-             payload.temperature, payload.smoke,
+    ESP_LOGI(TAG, "Sent T=%.1f H=%.1f smoke=%.1f batt=%u%% → bridge: %s",
+             payload.temperature, payload.humidity, payload.smoke,
              payload.battery_pct, esp_err_to_name(err));
 }
 
