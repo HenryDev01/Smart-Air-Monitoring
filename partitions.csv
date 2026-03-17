@@ -1,0 +1,16 @@
+# Custom partition table for SmartAirMonitoring
+# M5StickC Plus 1.1 — ESP32-PICO-V3-02 — 2MB flash (0x200000)
+#
+# Layout:
+#   Bootloader   0x1000   –  0x8000   (not in table)
+#   Part table   0x8000   –  0x9000
+#   NVS          0x9000   –  0xF000   ( 24 KB) — BLE Mesh provisioning state lives here
+#   PHY init     0xF000   –  0x10000  (  4 KB)
+#   factory      0x10000  –  0x1F0000 (1,920 KB = 0x1E0000) ← max app space
+#   nvs_key      0x1F0000 –  0x200000 ( 64 KB) — mesh/BLE NVS overflow
+#
+# Name,   Type, SubType,  Offset,   Size,    Flags
+nvs,      data, nvs,      0x9000,   0x6000,
+phy_init, data, phy,      0xF000,   0x1000,
+factory,  app,  factory,  0x10000,  0x1E0000,
+nvs_key,  data, nvs_keys, 0x1F0000, 0x10000,
