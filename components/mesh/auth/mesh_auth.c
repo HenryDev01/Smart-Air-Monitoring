@@ -268,11 +268,11 @@ void auth_handle_join_request(const pkt_join_req_t *req,
     // Right now unix_now() is just seconds since boot, not real time. 
     // If nodes reboot at different times, timestamps will be out of sync,
     uint32_t now = unix_now();
-    if ((int32_t)(now - r.timestamp) > TIMESTAMP_TOLERANCE ||
-        (int32_t)(now - r.timestamp) < -TIMESTAMP_TOLERANCE) {
-        ESP_LOGW(TAG, "Timestamp out of window — rejecting");
-        goto reject;
-    }
+    // if ((int32_t)(now - r.timestamp) > TIMESTAMP_TOLERANCE ||
+    //     (int32_t)(now - r.timestamp) < -TIMESTAMP_TOLERANCE) {
+    //     ESP_LOGW(TAG, "Timestamp out of window — rejecting");
+    //     goto reject;
+    // }
 
     /* 2. Key lookup */
     uint8_t key[HMAC_KEY_LEN];
