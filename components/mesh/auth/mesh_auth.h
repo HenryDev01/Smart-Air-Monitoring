@@ -7,6 +7,8 @@ esp_err_t auth_provision_key(const uint8_t *key, size_t key_len);
 
 /* Module init */
 void auth_init(void);
+void auth_deinit(void);
+
 
 /* Node-side (client) */
 void auth_send_join_request(void);

@@ -32,6 +32,8 @@ static const char *TAG = "M5_NODE";
 #define SENSOR_PUBLISH_MS  15000
 #define SENSOR_TASK_STACK  4096
 
+
+
 /* ── State ───────────────────────────────────────────────── */
 static uint8_t  s_dev_uuid[16] = {0};
 static uint8_t  s_my_mac[6]    = {0};
@@ -83,6 +85,10 @@ static esp_ble_mesh_comp_t s_comp = {
     .element_count = ARRAY_SIZE(s_elements),
     .elements      = s_elements,
 };
+
+// task
+static TaskHandle_t s_sensor_handle = NULL;
+
 
 /* ═══════════════════════════════════════════════════════════
    READ SENSORS  — replace stubs with real drivers
@@ -172,7 +178,7 @@ static void config_srv_cb(esp_ble_mesh_cfg_server_cb_event_t event,
                            esp_ble_mesh_cfg_server_cb_param_t *param)
 {
     if (event != ESP_BLE_MESH_CFG_SERVER_STATE_CHANGE_EVT) return;
-
+    ESP_LOGI(TAG, "Provisioner addr: 0x%04X", param->ctx.addr);
     switch (param->ctx.recv_op) {
     case ESP_BLE_MESH_MODEL_OP_APP_KEY_ADD:
         s_app_idx = param->value.state_change.appkey_add.app_idx;
@@ -250,7 +256,10 @@ static void sensor_task(void *arg)
 /* ═══════════════════════════════════════════════════════════
    INIT
    ═══════════════════════════════════════════════════════════ */
-esp_err_t node_init(void)
+
+
+/* Init BLE stack + mesh models, but do NOT start beacon */
+esp_err_t node_init_silent(void)
 {
     esp_err_t err;
 
@@ -258,72 +267,198 @@ esp_err_t node_init(void)
 
     esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
     err = esp_bt_controller_init(&bt_cfg);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "bt_controller_init: %s", esp_err_to_name(err));
-        return err;
-    }
+    if (err != ESP_OK) return err;
 
     err = esp_bt_controller_enable(ESP_BT_MODE_BLE);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "bt_controller_enable: %s", esp_err_to_name(err));
-        return err;
-    }
+    if (err != ESP_OK) return err;
 
     err = esp_bluedroid_init();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "bluedroid_init: %s", esp_err_to_name(err));
-        return err;
-    }
+    if (err != ESP_OK) return err;
 
     err = esp_bluedroid_enable();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "bluedroid_enable: %s", esp_err_to_name(err));
-        return err;
-    }
+    if (err != ESP_OK) return err;
 
-    /* UUID from BT MAC — unique per device */
     esp_read_mac(s_my_mac, ESP_MAC_BT);
-    s_dev_uuid[0] = 0xEE; s_dev_uuid[1] = 0xEE; /* 0xEE = sensor node */
+    s_dev_uuid[0] = 0xEE; s_dev_uuid[1] = 0xEE;
     s_dev_uuid[2] = s_my_mac[0]; s_dev_uuid[3] = s_my_mac[1];
     s_dev_uuid[4] = s_my_mac[2]; s_dev_uuid[5] = s_my_mac[3];
     s_dev_uuid[6] = s_my_mac[4]; s_dev_uuid[7] = s_my_mac[5];
-
-    ESP_LOGI(TAG, "BT MAC: " MACSTR, MAC2STR(s_my_mac));
 
     esp_ble_mesh_register_prov_callback(prov_cb);
     esp_ble_mesh_register_config_server_callback(config_srv_cb);
     esp_ble_mesh_register_custom_model_callback(model_cb);
 
     err = esp_ble_mesh_init(&s_prov, &s_comp);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_ble_mesh_init: %s", esp_err_to_name(err));
-        return err;
-    }
+    if (err != ESP_OK) return err;
 
     esp_ble_mesh_set_unprovisioned_device_name("M5-SENSOR");
 
     if (esp_ble_mesh_node_is_provisioned()) {
-        /* Already provisioned from NVS — skip beacon, just start publishing */
         s_provisioned = true;
         s_my_addr     = esp_ble_mesh_get_primary_element_address();
+        s_app_idx     = PROV_APP_IDX;
+        s_net_idx     = PROV_NET_IDX;
         ESP_LOGI(TAG, "Already provisioned (NVS) addr=0x%04X", s_my_addr);
-        /* app_idx will be restored from NVS automatically by the stack */
-        s_app_idx = PROV_APP_IDX;
-        s_net_idx = PROV_NET_IDX;
-    } else {
-        /* Not provisioned — broadcast beacon, wait for bridge */
-        err = esp_ble_mesh_node_prov_enable(
-            (esp_ble_mesh_prov_bearer_t)(ESP_BLE_MESH_PROV_ADV |
-                                         ESP_BLE_MESH_PROV_GATT));
+    }
+    /* ← beacon NOT started here */
+
+    xTaskCreatePinnedToCore(sensor_task, "sensor",
+        SENSOR_TASK_STACK, NULL, tskIDLE_PRIORITY + 2, &s_sensor_handle, 1);
+
+    ESP_LOGI(TAG, "BLE stack ready (beacon not yet started)");
+    return ESP_OK;
+}
+
+/* Original node_init = silent init + immediate beacon */
+esp_err_t node_init(void)
+{
+    esp_err_t err = node_init_silent();
+    if (err != ESP_OK) return err;
+
+    if (!esp_ble_mesh_node_is_provisioned()) {
+        err = esp_ble_mesh_node_prov_enable( // beacon
+            ESP_BLE_MESH_PROV_ADV | ESP_BLE_MESH_PROV_GATT);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "node_prov_enable: %s", esp_err_to_name(err));
             return err;
         }
     }
-
-    xTaskCreatePinnedToCore(sensor_task, "sensor",
-        SENSOR_TASK_STACK, NULL, tskIDLE_PRIORITY + 2, NULL, 1);
-
-    ESP_LOGI(TAG, "M5StickC node ready");
     return ESP_OK;
 }
+
+
+// esp_err_t node_init(void)
+// {
+//     esp_err_t err;
+
+//     ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT));
+
+//     esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+//     err = esp_bt_controller_init(&bt_cfg);
+//     if (err != ESP_OK) {
+//         ESP_LOGE(TAG, "bt_controller_init: %s", esp_err_to_name(err));
+//         return err;
+//     }
+
+//     err = esp_bt_controller_enable(ESP_BT_MODE_BLE);
+//     if (err != ESP_OK) {
+//         ESP_LOGE(TAG, "bt_controller_enable: %s", esp_err_to_name(err));
+//         return err;
+//     }
+
+//     err = esp_bluedroid_init();
+//     if (err != ESP_OK) {
+//         ESP_LOGE(TAG, "bluedroid_init: %s", esp_err_to_name(err));
+//         return err;
+//     }
+
+//     err = esp_bluedroid_enable();
+//     if (err != ESP_OK) {
+//         ESP_LOGE(TAG, "bluedroid_enable: %s", esp_err_to_name(err));
+//         return err;
+//     }
+
+//     /* UUID from BT MAC — unique per device */
+//     esp_read_mac(s_my_mac, ESP_MAC_BT);
+//     s_dev_uuid[0] = 0xEE; s_dev_uuid[1] = 0xEE; /* 0xEE = sensor node */
+//     s_dev_uuid[2] = s_my_mac[0]; s_dev_uuid[3] = s_my_mac[1];
+//     s_dev_uuid[4] = s_my_mac[2]; s_dev_uuid[5] = s_my_mac[3];
+//     s_dev_uuid[6] = s_my_mac[4]; s_dev_uuid[7] = s_my_mac[5];
+
+//     ESP_LOGI(TAG, "BT MAC: " MACSTR, MAC2STR(s_my_mac));
+
+//     esp_ble_mesh_register_prov_callback(prov_cb);
+//     esp_ble_mesh_register_config_server_callback(config_srv_cb);
+//     esp_ble_mesh_register_custom_model_callback(model_cb);
+
+//     err = esp_ble_mesh_init(&s_prov, &s_comp);
+//     if (err != ESP_OK) {
+//         ESP_LOGE(TAG, "esp_ble_mesh_init: %s", esp_err_to_name(err));
+//         return err;
+//     }
+
+//     esp_ble_mesh_set_unprovisioned_device_name("M5-SENSOR");
+
+//     if (esp_ble_mesh_node_is_provisioned()) {
+//         /* Already provisioned from NVS — skip beacon, just start publishing */
+//         s_provisioned = true;
+//         s_my_addr     = esp_ble_mesh_get_primary_element_address();
+//         ESP_LOGI(TAG, "Already provisioned (NVS) addr=0x%04X", s_my_addr);
+//         /* app_idx will be restored from NVS automatically by the stack */
+//         s_app_idx = PROV_APP_IDX;
+//         s_net_idx = PROV_NET_IDX;
+//     } else {
+//         /* Not provisioned — broadcast beacon, wait for bridge */
+//         err = esp_ble_mesh_node_prov_enable(
+//             (esp_ble_mesh_prov_bearer_t)(ESP_BLE_MESH_PROV_ADV |
+//                                          ESP_BLE_MESH_PROV_GATT));
+//         if (err != ESP_OK) {
+//             ESP_LOGE(TAG, "node_prov_enable: %s", esp_err_to_name(err));
+//             return err;
+//         }
+//     }
+
+//     xTaskCreatePinnedToCore(sensor_task, "sensor",
+//         SENSOR_TASK_STACK, NULL, tskIDLE_PRIORITY + 2, &s_sensor_handle, 1);
+
+//     ESP_LOGI(TAG, "M5StickC node ready");
+//     return ESP_OK;
+// }
+
+
+/* ═══════════════════════════════════════════════════════════
+   node_deinit
+   Tears down the BLE node stack in the correct order.
+   Call from task context only — never from a BLE callback.
+   ═══════════════════════════════════════════════════════════ */
+esp_err_t node_deinit(void)
+{
+    esp_err_t err;
+
+     if (s_sensor_handle) {
+        vTaskDelete(s_sensor_handle);
+        s_sensor_handle = NULL;
+    }
+ 
+    /* 1. Stop advertising / scanning so no new callbacks fire */
+    err = esp_ble_mesh_node_prov_disable(
+              ESP_BLE_MESH_PROV_ADV | ESP_BLE_MESH_PROV_GATT);
+    if (err != ESP_OK)
+        ESP_LOGW(TAG, "node_prov_disable: %s", esp_err_to_name(err));
+ 
+    /* Small gap — let any in-flight callbacks drain */
+    vTaskDelay(pdMS_TO_TICKS(200));
+ 
+    /* 2. Tear down the BLE Mesh stack */
+    esp_ble_mesh_deinit_param_t param = {
+    .erase_flash = true  // true if you want to wipe provisioning data from flash
+    };
+    esp_ble_mesh_deinit(&param);
+    if (err != ESP_OK)
+        ESP_LOGW(TAG, "ble_mesh_deinit: %s", esp_err_to_name(err));
+ 
+    vTaskDelay(pdMS_TO_TICKS(100));
+ 
+    /* 3. Tear down Bluedroid */
+    err = esp_bluedroid_disable();
+    if (err != ESP_OK)
+        ESP_LOGW(TAG, "bluedroid_disable: %s", esp_err_to_name(err));
+ 
+    err = esp_bluedroid_deinit();
+    if (err != ESP_OK)
+        ESP_LOGW(TAG, "bluedroid_deinit: %s", esp_err_to_name(err));
+ 
+    /* 4. Tear down BT controller */
+    err = esp_bt_controller_disable();
+    if (err != ESP_OK)
+        ESP_LOGW(TAG, "bt_controller_disable: %s", esp_err_to_name(err));
+ 
+    err = esp_bt_controller_deinit();
+    if (err != ESP_OK)
+        ESP_LOGW(TAG, "bt_controller_deinit: %s", esp_err_to_name(err));
+ 
+    ESP_LOGI(TAG, "BLE node stack torn down");
+    return ESP_OK;
+}
+ 
+ 

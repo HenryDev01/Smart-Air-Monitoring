@@ -26,6 +26,9 @@ static const char *TAG = "GOSSIP";
 static uint32_t s_seen[GOSSIP_SEEN_SIZE] = {0};
 static uint8_t  s_seen_idx = 0;
 
+
+
+
 static bool is_seen(uint32_t id)
 {
 
@@ -103,7 +106,7 @@ void gossip_send(const uint8_t *payload, uint8_t len, uint8_t ttl)
     esp_read_mac(my_mac, ESP_MAC_WIFI_STA);
 
     pkt_gossip_t pkt = {
-        .hdr        = { .type = PKT_GOSSIP, .seq = seq },
+        .hdr        = { .type = PKT_GOSSIP, .seq = seq, .origin = SRC_WIFI },
         .msg_id     = (uint32_t)(esp_timer_get_time() >> 10) ^ seq,
         .ttl        = ttl ? ttl : GOSSIP_TTL_DEFAULT,
         .payload_len = len,
@@ -166,4 +169,10 @@ void gossip_init(void)
     memset(s_seen, 0, sizeof(s_seen));
     s_seen_idx = 0;
     ESP_LOGI(TAG, "Gossip init (TTL=%d cache=%d)", GOSSIP_TTL_DEFAULT, GOSSIP_SEEN_SIZE);
+}
+void gossip_deinit(void)
+{
+    memset(s_seen, 0, sizeof(s_seen));
+    s_seen_idx = 0;
+    ESP_LOGI(TAG, "Gossip deinit done");
 }

@@ -17,8 +17,8 @@
 #define MESH_CHANNEL         6
 #define MESH_MAX_LAYERS      6
 #define MESH_AP_MAX_CONN     6
-#define MESH_ROUTER_SSID      "Boey"
-#define MESH_ROUTER_PASSWORD  "Boey!23456789"
+#define MESH_ROUTER_SSID      "Galaxy S23 FE 13E4"
+#define MESH_ROUTER_PASSWORD  "Henry123"
 #define MESH_GROUP_ID        {0x01,0x00,0x00,0x00,0x00,0x01}  // for group messages
 
 /* ─────────────────────────────────────────────
@@ -80,6 +80,11 @@ typedef enum {
     PKT_AUTH_SUCCESS   = 0x16,
 } pkt_type_t;
 
+typedef enum {
+    SRC_BLE  = 1,
+    SRC_WIFI = 2
+} src_type_t;
+
 typedef enum{
     CFG_TYPE_THRESHOLD = 0x01,
     CFG_TYPE_ALERT     = 0x02,
@@ -94,6 +99,7 @@ typedef struct __attribute__((packed)) {
     uint8_t    type;           // pkt_type_t
     uint8_t    src_id[6];      // sender MAC
     uint32_t   seq;            // monotonic sequence number
+    uint8_t    origin;         // BLE or WIFI
 } pkt_hdr_t;
 
 // Sensor reading (node → root)

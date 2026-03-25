@@ -42,6 +42,8 @@ static int s_auth_retries = 0;
 static const char *TAG = "AUTH";
 
 static auth_node_authenticated_cb_t s_auth_cb = NULL;
+static TaskHandle_t s_watchdog_handle = NULL;
+
 
 void auth_set_authenticated_cb(auth_node_authenticated_cb_t cb)
 {
@@ -477,6 +479,40 @@ void auth_init(void)
     auth_load_credentials();
 
     xTaskCreatePinnedToCore(watchdog_task, "auth_wdog", 2560, NULL,
-                            tskIDLE_PRIORITY + 1, NULL, 1);
+                            tskIDLE_PRIORITY + 1, &s_watchdog_handle, 1);
     ESP_LOGI(TAG, "Auth init — " MACSTR, MAC2STR(s_my_mac));
 }
+
+
+
+void auth_deinit(void)
+{
+    /* 1. Stop watchdog task */
+    if (s_watchdog_handle) {
+        vTaskDelete(s_watchdog_handle);
+        s_watchdog_handle = NULL;
+    }
+ 
+    /* 2. Clear session table under mutex then destroy it */
+    if (s_sess_mutex) {
+        xSemaphoreTake(s_sess_mutex, portMAX_DELAY);
+        memset(s_sessions, 0, sizeof(s_sessions));
+        xSemaphoreGive(s_sess_mutex);
+        vSemaphoreDelete(s_sess_mutex);
+        s_sess_mutex = NULL;
+    }
+ 
+    /* 3. Clear key material from RAM */
+    memset(s_my_key, 0, HMAC_KEY_LEN);
+    memset(s_my_mac, 0, sizeof(s_my_mac));
+    s_key_loaded      = false;
+    s_authenticated   = false;
+    s_session_expires = 0;
+    s_auth_retries    = 0;
+    s_auth_cb         = NULL;
+ 
+
+ 
+    ESP_LOGI(TAG, "Auth deinit done");
+}
+ 

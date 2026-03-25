@@ -66,6 +66,12 @@ typedef struct {
     bool     success;
 } cfg_result_t;
 
+//task related
+static TaskHandle_t s_vendor_msg_task_handle  = NULL;
+static TaskHandle_t s_config_node_task_handle = NULL;
+static TaskHandle_t s_advert_task_handle      = NULL;
+
+// this is to send let the ble data to seperate task with seperated larger memory (stack) to process because BLE mesh has small stack.
 static QueueHandle_t s_cfg_queue  = NULL;
 static QueueHandle_t s_cfg_result = NULL;
 
@@ -101,8 +107,8 @@ static esp_ble_mesh_cfg_srv_t s_cfg_srv = {
     .friend_state     = ESP_BLE_MESH_FRIEND_ENABLED,
     .gatt_proxy       = ESP_BLE_MESH_GATT_PROXY_ENABLED,
     .default_ttl      = 7,
-    .net_transmit     = ESP_BLE_MESH_TRANSMIT(2, 20),
-    .relay_retransmit = ESP_BLE_MESH_TRANSMIT(2, 20),
+    .net_transmit     = ESP_BLE_MESH_TRANSMIT(4, 20),
+    .relay_retransmit = ESP_BLE_MESH_TRANSMIT(4, 20),
 };
 
 static esp_ble_mesh_client_t s_cfg_client;
@@ -143,7 +149,7 @@ static void forward_to_wifi_mesh(const ble_sensor_payload_t *ble)
     }
 
     pkt_sensor_t pkt = {
-        .hdr         = { .type = PKT_SENSOR_DATA, .seq = s_fwd_seq++ },
+        .hdr         = { .type = PKT_SENSOR_DATA, .seq = s_fwd_seq++, .origin = SRC_BLE },
         .temperature = ble->temperature,
         .smoke       = ble->smoke,
         .hop_count   = (uint8_t)(esp_mesh_get_layer() + 1),
@@ -190,7 +196,7 @@ static void send_appkey_to_node(uint16_t addr)
         .ctx.app_idx  = 0,
         .ctx.addr     = addr,
         .ctx.send_ttl = 3,
-        .msg_timeout  = 10000,
+        .msg_timeout  = 20000,
     };
     esp_err_t e = esp_ble_mesh_config_client_set_state(&common, &set);
     ESP_LOGI(TAG, "AppKey → 0x%04x: %s", addr, esp_err_to_name(e));
@@ -215,7 +221,7 @@ static void send_model_bind_to_node(uint16_t addr)
         .ctx.app_idx  = 0,
         .ctx.addr     = addr,
         .ctx.send_ttl = 3,
-        .msg_timeout  = 10000,
+        .msg_timeout  = 20000,
     };
     esp_err_t e = esp_ble_mesh_config_client_set_state(&common, &set);
     ESP_LOGI(TAG, "Model bind → 0x%04x: %s", addr, esp_err_to_name(e));
@@ -269,7 +275,7 @@ static void config_node_task(void *arg)
             /* Wait for config_client_cb to post the result.
                Timeout is slightly longer than msg_timeout (10 s). */
             cfg_result_t result;
-            if (xQueueReceive(s_cfg_result, &result, pdMS_TO_TICKS(12000)) != pdTRUE) {
+            if (xQueueReceive(s_cfg_result, &result, pdMS_TO_TICKS(22000)) != pdTRUE) {
                 job.retries++;
                 ESP_LOGW(TAG, "No result for 0x%04x state=%d retry=%d/%d",
                          job.addr, job.state, job.retries, MAX_RETRIES);
@@ -303,7 +309,7 @@ static void config_node_task(void *arg)
                 job.state = CFG_STATE_DONE;
             }
 
-            vTaskDelay(pdMS_TO_TICKS(300));
+            vTaskDelay(pdMS_TO_TICKS(1000));
         }
 
         if (job.retries >= MAX_RETRIES)
@@ -443,7 +449,7 @@ static void prov_cb(esp_ble_mesh_prov_cb_event_t event,
 
         /* Small delay so node can store provisioning keys before we
            start sending config messages */
-        vTaskDelay(pdMS_TO_TICKS(500));
+        vTaskDelay(pdMS_TO_TICKS(2000));
 
         cfg_job_t job = {
             .addr    = addr,
@@ -563,10 +569,10 @@ esp_err_t ble_bridge_init(void)
     }
 
     xTaskCreatePinnedToCore(vendor_msg_task, "vnd_msg",
-        2048, NULL, tskIDLE_PRIORITY + 2, NULL, 1);
+        2048, NULL, tskIDLE_PRIORITY + 2, &s_vendor_msg_task_handle, 1);
 
     xTaskCreatePinnedToCore(config_node_task, "cfg_node",
-        3072, NULL, tskIDLE_PRIORITY + 3, NULL, 1);
+        3072, NULL, tskIDLE_PRIORITY + 3, &s_config_node_task_handle, 1);
 
     esp_ble_mesh_register_prov_callback(prov_cb);
     esp_ble_mesh_register_custom_model_callback(model_cb);
@@ -604,8 +610,71 @@ esp_err_t ble_bridge_init(void)
         s_prov.prov_unicast_addr, CID_ESP, VENDOR_MODEL_ID, GROUP_SENSOR);
 
     xTaskCreatePinnedToCore(bridge_advert_task, "ble_advert",
-        ADVERT_TASK_STACK, NULL, tskIDLE_PRIORITY + 1, NULL, 1);
+        ADVERT_TASK_STACK, NULL, tskIDLE_PRIORITY + 1, &s_advert_task_handle, 1);
 
     ESP_LOGI(TAG, "BLE bridge READY — provisioner active, forwarding BLE->WiFi");
+    return ESP_OK;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   ble_bridge_deinit
+   Tears down the BLE bridge (provisioner) stack.
+   Also deletes the FreeRTOS queues created in ble_bridge_init.
+   Call from task context only — never from a BLE callback.
+   ═══════════════════════════════════════════════════════════ */
+esp_err_t ble_bridge_deinit(void)
+{
+    esp_err_t err;
+ 
+    /* 1. Stop provisioner scanning so no new prov callbacks fire */
+    err = esp_ble_mesh_provisioner_prov_disable(ESP_BLE_MESH_PROV_ADV);
+    if (err != ESP_OK)
+        ESP_LOGW(TAG, "provisioner_prov_disable: %s", esp_err_to_name(err));
+ 
+    vTaskDelay(pdMS_TO_TICKS(200));
+ 
+    /* 2. Tear down BLE Mesh stack */
+    esp_ble_mesh_deinit_param_t param = {
+    .erase_flash = true  // true if you want to wipe provisioning data from flash
+    };
+    err = esp_ble_mesh_deinit(&param);
+    if (err != ESP_OK)
+        ESP_LOGW(TAG, "ble_mesh_deinit: %s", esp_err_to_name(err));
+ 
+    vTaskDelay(pdMS_TO_TICKS(100));
+ 
+    /* 3. Tear down Bluedroid */
+    err = esp_bluedroid_disable();
+    if (err != ESP_OK)
+        ESP_LOGW(TAG, "bluedroid_disable: %s", esp_err_to_name(err));
+ 
+    err = esp_bluedroid_deinit();
+    if (err != ESP_OK)
+        ESP_LOGW(TAG, "bluedroid_deinit: %s", esp_err_to_name(err));
+ 
+    /* 4. Tear down BT controller */
+    err = esp_bt_controller_disable();
+    if (err != ESP_OK)
+        ESP_LOGW(TAG, "bt_controller_disable: %s", esp_err_to_name(err));
+ 
+    err = esp_bt_controller_deinit();
+    if (err != ESP_OK)
+        ESP_LOGW(TAG, "bt_controller_deinit: %s", esp_err_to_name(err));
+    
+    //tear down task
+    if (s_advert_task_handle)      { vTaskDelete(s_advert_task_handle);      s_advert_task_handle      = NULL; }
+    if (s_vendor_msg_task_handle)  { vTaskDelete(s_vendor_msg_task_handle);  s_vendor_msg_task_handle  = NULL; }
+    if (s_config_node_task_handle) { vTaskDelete(s_config_node_task_handle); s_config_node_task_handle = NULL; }
+
+    /* 5. Delete queues — they will be recreated on next ble_bridge_init */
+    if (s_cfg_queue)  { vQueueDelete(s_cfg_queue);  s_cfg_queue  = NULL; }
+    if (s_cfg_result) { vQueueDelete(s_cfg_result); s_cfg_result = NULL; }
+    if (s_msg_queue)  { vQueueDelete(s_msg_queue);  s_msg_queue  = NULL; }
+ 
+    /* 6. Reset runtime state */
+    s_bridge_load = 0;
+    s_fwd_seq     = 0;
+ 
+    ESP_LOGI(TAG, "BLE bridge stack torn down");
     return ESP_OK;
 }

@@ -15,6 +15,7 @@ static uint32_t         s_hello_seq   = 0;
 static float            s_etx_to_root = ETX_INFINITY;
 static uint8_t          s_my_mac[6]   = {0};
 
+static TaskHandle_t s_hello_handle = NULL;
 
 
 static inline uint32_t now_ms(void)
@@ -195,7 +196,7 @@ static void hello_task(void *arg)
     ESP_LOGI(TAG, "Hello task started");
     while (1) {
         pkt_hello_t h = {
-            .hdr = { .type = PKT_HELLO, .seq = s_hello_seq++ },
+            .hdr = { .type = PKT_HELLO, .seq = s_hello_seq++, .origin = SRC_WIFI },
             .etx_to_root    = s_etx_to_root,
             .hop_count      = (uint8_t)esp_mesh_get_layer(),
             .layer          = (uint8_t)esp_mesh_get_layer(),
@@ -261,7 +262,32 @@ void routing_init(void)
 
     /* pinned to core 1, low priority — background task */
     xTaskCreatePinnedToCore(hello_task, "hello_bcast", 2560, NULL,
-                            tskIDLE_PRIORITY + 2, NULL, 1);
+                            tskIDLE_PRIORITY + 2, &s_hello_handle, 1);
 
     ESP_LOGI(TAG, "Routing init — MAC " MACSTR, MAC2STR(s_my_mac));
+}
+
+void routing_deinit(void)
+{
+    /* 1. Stop hello broadcast task */
+    if (s_hello_handle) {
+        vTaskDelete(s_hello_handle);
+        s_hello_handle = NULL;
+    }
+ 
+    /* 2. Clear neighbor table under mutex then destroy it */
+    if (s_nb_mutex) {
+        xSemaphoreTake(s_nb_mutex, portMAX_DELAY);
+        memset(s_nb, 0, sizeof(s_nb));
+        xSemaphoreGive(s_nb_mutex);
+        vSemaphoreDelete(s_nb_mutex);
+        s_nb_mutex = NULL;
+    }
+ 
+    /* 3. Reset state */
+    s_hello_seq   = 0;
+    s_etx_to_root = ETX_INFINITY;
+    memset(s_my_mac, 0, sizeof(s_my_mac));
+ 
+    ESP_LOGI(TAG, "Routing deinit done");
 }

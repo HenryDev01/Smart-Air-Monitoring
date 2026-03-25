@@ -20,6 +20,8 @@ static uint32_t s_sensor_seq = 0;
 static uint8_t  s_my_mac[6]  = {0};
 static const char *TAG = "SENSOR";
 
+static TaskHandle_t s_sensor_handle = NULL;
+
 
 static float read_temperature(void)
 {
@@ -75,6 +77,7 @@ static void send_sensor_reading(void *arg)
             .hdr = {
                 .type = PKT_SENSOR_DATA,
                 .seq  = s_sensor_seq++,
+                .origin = SRC_WIFI,
             },
             .temperature = temp,
             .smoke    = smoke,
@@ -140,6 +143,21 @@ void sensor_init(void)
                             4096,
                             NULL,
                             tskIDLE_PRIORITY + 2,
-                            NULL,
+                            &s_sensor_handle,
                             1);
 }
+
+void sensor_deinit(void)
+{
+    /* 1. Stop sensor task */
+    if (s_sensor_handle) {
+        vTaskDelete(s_sensor_handle);
+        s_sensor_handle = NULL;
+    }
+ 
+    /* 2. Reset MAC */
+    memset(s_my_mac, 0, sizeof(s_my_mac));
+ 
+    ESP_LOGI(TAG, "Sensor deinit done");
+}
+ 

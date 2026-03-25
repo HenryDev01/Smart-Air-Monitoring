@@ -172,5 +172,17 @@ esp_err_t mqtt_init(void)
 
     esp_mqtt_client_register_event(s_client, ESP_EVENT_ANY_ID,
                                    mqtt_event_handler, NULL);
+    
     return esp_mqtt_client_start(s_client);
+}
+
+void mqtt_deinit(void)
+{
+    if (s_client == NULL) return;
+
+    esp_mqtt_client_stop(s_client);      // ← stops reconnect task
+    esp_mqtt_client_destroy(s_client);   // ← frees all resources
+    s_client    = NULL;
+    s_connected = false;
+    ESP_LOGI(TAG, "MQTT client destroyed");
 }

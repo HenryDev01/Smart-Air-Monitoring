@@ -7,4 +7,5 @@ idf_component_register(
     REQUIRES utils
     REQUIRES air_mqtt
     REQUIRES ble_mesh
+    REQUIRES mode_switch
 )
