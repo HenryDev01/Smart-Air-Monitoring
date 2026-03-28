@@ -6,7 +6,7 @@
 /* ── Timing ──────────────────────────────────────────────── */
 #define WIFI_MESH_JOIN_TIMEOUT_MS   30000
 #define WIFI_MESH_CHECK_MS           2000
-#define MODE_MONITOR_MS              5000
+#define MODE_MONITOR_MS              15000
 #define WIFI_LOSS_THRESHOLD              8   /* consecutive misses before demotion */
 #define BLE_BEACON_HOLD_MS            8000   // 5100ms deinit + ~2000ms margin
 #define BLE_ADV_JITTER_MAX_MS  5000   // max random delay before adv

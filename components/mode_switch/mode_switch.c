@@ -313,11 +313,14 @@ static void mode_monitor_task(void *arg)
            during this window, as it would race the task.      */
         case NODE_MODE_BLE_STABILIZING: {
             ESP_LOGI(TAG, "[monitor] stabilizing — probing WiFi opportunistically...");
-            bool joined = try_join_wifi_mesh(WIFI_MESH_JOIN_TIMEOUT_MS);
-            if (joined) {
-                enter_wifi_bridge_mode(); // this sets s_mode, stabilize task will see the guard
-            }
-            break;
+                    
+            // ESP_LOGI(TAG, "[monitor] BLE-only — waiting 10s before WiFi probe...");
+            // vTaskDelay(pdMS_TO_TICKS(10000));
+            // bool joined = try_join_wifi_mesh(WIFI_MESH_JOIN_TIMEOUT_MS);
+            // if (joined) {
+            //     enter_wifi_bridge_mode(); // this sets s_mode, stabilize task will see the guard
+            // }
+            // break;
             break;
         }
 
@@ -328,7 +331,15 @@ static void mode_monitor_task(void *arg)
                          ble_retry_count);
                 break;
             }
+                // ← Add this block
+            if (s_ble_node_running && !node_is_config_complete()) {
+                ESP_LOGI(TAG, "[monitor] BLE provisioning in progress — skipping WiFi probe");
+                break;
+            }
 
+            
+            ESP_LOGI(TAG, "[monitor] BLE-only — waiting 10s before WiFi probe...");
+            vTaskDelay(pdMS_TO_TICKS(10000));
             ESP_LOGI(TAG, "[monitor] BLE-only — probing WiFi mesh...");
             bool joined = try_join_wifi_mesh(WIFI_MESH_JOIN_TIMEOUT_MS);
             if (joined) {
@@ -389,12 +400,14 @@ void mode_init(void)
     ESP_LOGI(TAG, "Boot: probing WiFi mesh for %d ms...",
              WIFI_MESH_JOIN_TIMEOUT_MS);
 
+
+
     bool joined = try_join_wifi_mesh(WIFI_MESH_JOIN_TIMEOUT_MS);
 
     ESP_LOGI(TAG, "Joined %d", joined);
     if (joined) {
         enter_wifi_bridge_mode();
-    } else {
+    } else {    
         ESP_LOGW(TAG, "No WiFi mesh at boot — starting as BLE node");
         enter_ble_node_mode();
     }

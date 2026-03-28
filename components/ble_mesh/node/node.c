@@ -90,6 +90,12 @@ static esp_ble_mesh_comp_t s_comp = {
 static TaskHandle_t s_sensor_handle = NULL;
 
 
+static bool s_config_complete = false;
+
+bool node_is_config_complete(void) {
+    return s_config_complete;
+}
+
 /* ═══════════════════════════════════════════════════════════
    READ SENSORS  — replace stubs with real drivers
    ═══════════════════════════════════════════════════════════ */
@@ -186,6 +192,7 @@ static void config_srv_cb(esp_ble_mesh_cfg_server_cb_event_t event,
         break;
     case ESP_BLE_MESH_MODEL_OP_MODEL_APP_BIND:
         s_app_idx = param->value.state_change.mod_app_bind.app_idx;
+        s_config_complete = true;  
         ESP_LOGI(TAG, "Model bound: app_idx=0x%04X — ready to publish!", s_app_idx);
         break;
     default:
