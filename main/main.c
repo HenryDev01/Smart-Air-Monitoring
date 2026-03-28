@@ -142,6 +142,7 @@
 #include "nvs_flash.h"
 
 #include "../components/mode_switch/mode_switch.h"
+#include "../ble_mesh/node/node.h"
 
 static const char *TAG = "m5stick";
 
@@ -168,5 +169,21 @@ void app_main(void)
      *
      * After this call app_main can return — everything runs in tasks.
      */
-    mode_init();
+     mode_init();
+
+         esp_err_t ret;
+
+    //    ESP_LOGI(TAG,"No WiFi connection detected, skipping BLE bridge initialization");
+    //      ret = nvs_flash_init();
+    //     if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
+    //         ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+    //         ESP_ERROR_CHECK(nvs_flash_erase());
+    //         ret = nvs_flash_init();
+    //     }
+    //  ESP_ERROR_CHECK(ret);
+    //     esp_err_t er = node_init();
+    //      if (er != ESP_OK) {
+    //      ESP_LOGE(TAG, "BLE bridge init failed: %s — continuing without BLE",
+    //              esp_err_to_name(er));
+    //     }
 }

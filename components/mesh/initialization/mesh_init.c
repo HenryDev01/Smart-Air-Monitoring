@@ -5,6 +5,7 @@
 #include "nvs_flash.h"
 #include "esp_log.h"
 #include "esp_mac.h"
+#include "esp_coexist.h"
 #include "freertos/event_groups.h"
 
 #include "../../configuration/air_mesh.h"
@@ -359,11 +360,17 @@ esp_err_t mesh_init(void)
     }
 
     /* 3. WiFi driver */
+
     wifi_init_config_t wifi_cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&wifi_cfg));
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_FLASH));
     ESP_ERROR_CHECK(esp_wifi_start());
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
+        wifi_config_t sta_cfg = {};
+    esp_wifi_get_config(WIFI_IF_STA, &sta_cfg);
+    sta_cfg.sta.scan_method = WIFI_SCAN_TYPE_PASSIVE;
+    esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
+
 
     /* 4. Mesh init then register handlers */
     ESP_ERROR_CHECK(esp_mesh_init());
@@ -394,8 +401,18 @@ esp_err_t mesh_init(void)
     ESP_ERROR_CHECK(esp_mesh_set_config(&mcfg));
     ESP_ERROR_CHECK(esp_mesh_set_self_organized(true, true));
 
+        // Allow auto election — NO fix_root(true) on any node
+    esp_mesh_fix_root(false);
+
+    // Only elect root if node can reach the router
+    esp_mesh_set_type(MESH_IDLE);  // Let mesh decide
+    esp_mesh_allow_root_conflicts(false);  // 👈 Prevent dual-root
     /* 6. Start mesh */
     ESP_ERROR_CHECK(esp_mesh_start());
+
+        // Passive scan for BLE coexistence
+    esp_mesh_set_passive_scan_time(100);
+    esp_coex_preference_set(ESP_COEX_PREFER_BT);
 
     mesh_addr_t group_id = {{0x01, 0x00, 0x00, 0x00, 0x00, 0x01}};
     esp_mesh_set_group_id(&group_id, 1);

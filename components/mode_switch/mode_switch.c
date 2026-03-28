@@ -28,6 +28,8 @@ static bool              s_wifi_running      = false;
 static bool              s_ble_bridge_running = false;
 static bool              s_wifi_modules_init  = false;
 static SemaphoreHandle_t s_mode_mutex        = NULL;
+static volatile bool s_wifi_probe_active = false;
+
 
 /* ═══════════════════════════════════════════════════════════
    INTERNAL HELPERS
@@ -42,16 +44,23 @@ static bool wifi_mesh_alive(void)
    ═══════════════════════════════════════════════════════════ */
 bool try_join_wifi_mesh(uint32_t timeout_ms)
 {
+    // --- Guard against concurrent probes ---
     xSemaphoreTake(s_mode_mutex, portMAX_DELAY);
-
-    /* Silence beacon before WiFi probe.
-       Only suppress if fully advertising (BLE_ONLY), not while stabilizing —
-       during stabilization the beacon is not yet enabled anyway. */
-    if (s_ble_node_running && s_mode == NODE_MODE_BLE_ONLY) {
-        ESP_LOGI(TAG, "  suspending beacon before WiFi probe...");
-        esp_ble_mesh_node_prov_disable(
-            ESP_BLE_MESH_PROV_ADV | ESP_BLE_MESH_PROV_GATT);
+    if (s_wifi_probe_active) {
+        xSemaphoreGive(s_mode_mutex);
+        ESP_LOGI(TAG, "probe already in progress, skipping");
+        return false;
     }
+    s_wifi_probe_active = true;
+
+    // Snapshot mode so we know whether to suppress beacon
+    bool was_ble_only = (s_ble_node_running && s_mode == NODE_MODE_BLE_ONLY);
+
+    // if (was_ble_only) {
+    //     ESP_LOGI(TAG, "  suspending beacon before WiFi probe...");
+    //     esp_ble_mesh_node_prov_disable(
+    //         ESP_BLE_MESH_PROV_ADV | ESP_BLE_MESH_PROV_GATT);
+    // }
 
     if (!s_wifi_modules_init) {
         auth_init();
@@ -62,18 +71,24 @@ bool try_join_wifi_mesh(uint32_t timeout_ms)
     }
 
     esp_err_t err = mesh_init();
+    xSemaphoreGive(s_mode_mutex);  // ← release BEFORE the wait loop
+
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "mesh_init: %s", esp_err_to_name(err));
+        xSemaphoreTake(s_mode_mutex, portMAX_DELAY);
+        s_wifi_probe_active = false;
         xSemaphoreGive(s_mode_mutex);
         return false;
     }
 
+    // --- Wait loop: NO mutex held ---
+    bool joined = false;
     uint32_t elapsed = 0;
     while (elapsed < timeout_ms) {
         if (wifi_mesh_alive()) {
             ESP_LOGI(TAG, "Joined WiFi mesh after %"PRIu32" ms", elapsed);
-            xSemaphoreGive(s_mode_mutex);
-            return true;
+            joined = true;
+            break;
         }
         vTaskDelay(pdMS_TO_TICKS(WIFI_MESH_CHECK_MS));
         elapsed += WIFI_MESH_CHECK_MS;
@@ -81,30 +96,34 @@ bool try_join_wifi_mesh(uint32_t timeout_ms)
                  elapsed, timeout_ms);
     }
 
-    ESP_LOGI(TAG, "Before mesh_deinit");
-    mesh_deinit();
-    auth_deinit();
-    routing_deinit();
-    gossip_deinit();
-    sensor_deinit();
-    s_wifi_modules_init = false;
+    // --- Teardown: re-acquire mutex only for shared state ---
+    xSemaphoreTake(s_mode_mutex, portMAX_DELAY);
 
-    ESP_LOGI(TAG, "Before esp_mesh_stop");
-    esp_mesh_stop();
-    ESP_LOGI(TAG, "After esp_mesh_stop");
+    if (!joined) {
+        ESP_LOGI(TAG, "Before mesh_deinit");
+        mesh_deinit();
+        auth_deinit();
+        routing_deinit();
+        gossip_deinit();
+        sensor_deinit();
+        s_wifi_modules_init = false;
 
-    /* Re-enable beacon only if we were fully in BLE_ONLY (advertising) mode.
-       If we're stabilizing, the beacon was never on — don't touch it. */
-    if (s_ble_node_running && s_mode == NODE_MODE_BLE_ONLY) {
-        ESP_LOGI(TAG, "  re-enabling beacon after failed probe");
-        esp_ble_mesh_node_prov_enable(
-            ESP_BLE_MESH_PROV_ADV | ESP_BLE_MESH_PROV_GATT);
+        ESP_LOGI(TAG, "Before esp_mesh_stop");
+        esp_mesh_stop();
+        ESP_LOGI(TAG, "After esp_mesh_stop");
+
+        // Re-check current mode — it may have changed during the wait
+        if (s_ble_node_running && s_mode == NODE_MODE_BLE_ONLY) {
+            ESP_LOGI(TAG, "  re-enabling beacon after failed probe");
+            esp_ble_mesh_node_prov_enable(
+                ESP_BLE_MESH_PROV_ADV | ESP_BLE_MESH_PROV_GATT);
+        }
     }
 
+    s_wifi_probe_active = false;
     xSemaphoreGive(s_mode_mutex);
-    return false;
+    return joined;
 }
-
 /* ═══════════════════════════════════════════════════════════
    INTERNAL: ble_stabilize_and_advertise_task
    Runs as a short-lived task so enter_ble_node_mode() can
@@ -120,17 +139,17 @@ static void ble_stabilize_and_advertise_task(void *arg)
              BLE_BEACON_HOLD_MS);
     vTaskDelay(pdMS_TO_TICKS(BLE_BEACON_HOLD_MS));
 
-    /* Bonus: probe WiFi one final time while stabilising.
-       If the mesh recovered we jump straight to bridge mode
-       and never advertise BLE at all.                        */
-    ESP_LOGI(TAG, "[stabilize] final WiFi probe during stabilization...");
-    bool recovered = try_join_wifi_mesh(WIFI_MESH_JOIN_TIMEOUT_MS);
-    if (recovered) {
-        ESP_LOGI(TAG, "[stabilize] WiFi recovered — entering bridge mode");
-        enter_wifi_bridge_mode();
-        vTaskDelete(NULL);
-        return;
-    }
+    // /* Bonus: probe WiFi one final time while stabilising.
+    //    If the mesh recovered we jump straight to bridge mode
+    //    and never advertise BLE at all.                        */
+    // ESP_LOGI(TAG, "[stabilize] final WiFi probe during stabilization...");
+    // bool recovered = try_join_wifi_mesh(WIFI_MESH_JOIN_TIMEOUT_MS);
+    // if (recovered) {
+    //     ESP_LOGI(TAG, "[stabilize] WiFi recovered — entering bridge mode");
+    //     enter_wifi_bridge_mode();
+    //     vTaskDelete(NULL);
+    //     return;
+    // }
 
     /* ── Option 1: Random jitter ────────────────────────────
        Each node picks a different random delay (0–5 s) before
@@ -293,7 +312,12 @@ static void mode_monitor_task(void *arg)
            must not try to probe WiFi or call enter_wifi_bridge
            during this window, as it would race the task.      */
         case NODE_MODE_BLE_STABILIZING: {
-            ESP_LOGI(TAG, "[monitor] BLE stabilizing — waiting for adv window...");
+            ESP_LOGI(TAG, "[monitor] stabilizing — probing WiFi opportunistically...");
+            bool joined = try_join_wifi_mesh(WIFI_MESH_JOIN_TIMEOUT_MS);
+            if (joined) {
+                enter_wifi_bridge_mode(); // this sets s_mode, stabilize task will see the guard
+            }
+            break;
             break;
         }
 

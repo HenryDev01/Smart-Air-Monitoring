@@ -532,7 +532,7 @@ esp_err_t ble_bridge_init(void)
         ESP_LOGE(TAG, "bt_controller_init: %s", esp_err_to_name(err)); return err;
     }
 
-    ESP_ERROR_CHECK(esp_coex_preference_set(ESP_COEX_PREFER_BALANCE));
+    // ESP_ERROR_CHECK(esp_coex_preference_set(ESP_COEX_PREFER_BALANCE));
 
     err = esp_bt_controller_enable(ESP_BT_MODE_BLE);
     if (err != ESP_OK) {
