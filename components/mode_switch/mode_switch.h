@@ -10,6 +10,8 @@
 #define WIFI_LOSS_THRESHOLD              8   /* consecutive misses before demotion */
 #define BLE_BEACON_HOLD_MS            8000   // 5100ms deinit + ~2000ms margin
 #define BLE_ADV_JITTER_MAX_MS  5000   // max random delay before adv
+#define WIFI_RSSI_DEMOTE_THRESHOLD  -75  // demote to BLE if signal drops below this
+
 
 /* ── Mode enum ───────────────────────────────────────────── */
 typedef enum {
@@ -52,3 +54,4 @@ void enter_ble_node_mode(void);
  * @brief  Alias for enter_ble_node_mode — called when WiFi mesh is lost.
  */
 void demote_to_ble_node_mode(void);
+

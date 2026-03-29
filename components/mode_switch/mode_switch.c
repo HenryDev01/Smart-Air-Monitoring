@@ -9,6 +9,7 @@
 #include "esp_wifi.h"
 #include "esp_random.h"   // ← for esp_random() jitter
 #include "nvs_flash.h"
+#include "esp_coexist.h"
 
 #include "../mesh/initialization/mesh_init.h"
 #include "../mesh/routing/mesh_routing.h"
@@ -18,6 +19,7 @@
 #include "../ble_mesh/bridge/ble_bridge.h"
 #include "../ble_mesh/node/node.h"
 #include "../air_mqtt/air_mqtt.h"
+#include "../utils/utils.h"
 
 static const char *TAG = "MODE_SWITCH";
 
@@ -28,6 +30,7 @@ static bool              s_wifi_running      = false;
 static bool              s_ble_bridge_running = false;
 static bool              s_wifi_modules_init  = false;
 static SemaphoreHandle_t s_mode_mutex        = NULL;
+static bool s_wifi_initialized = false;
 static volatile bool s_wifi_probe_active = false;
 
 
@@ -52,6 +55,37 @@ bool try_join_wifi_mesh(uint32_t timeout_ms)
         return false;
     }
     s_wifi_probe_active = true;
+    xSemaphoreGive(s_mode_mutex);  // ← release before signal check
+
+    // Start WiFi minimally for signal check
+   
+    // if (!s_wifi_initialized) {
+    //     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    //     esp_wifi_init(&cfg);
+    //     s_wifi_initialized = true;
+    // }
+    // esp_wifi_set_mode(WIFI_MODE_STA);
+
+    // // ← Add these two lines before esp_wifi_start()
+    // esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+    // esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
+
+    // esp_wifi_start();
+
+    
+
+    bool strong = wifi_signal_strong_enough();
+
+    if (!strong) {
+        ESP_LOGI(TAG, "Signal too weak — skipping mesh join");
+        esp_wifi_stop();
+        // esp_wifi_deinit();
+        xSemaphoreTake(s_mode_mutex, portMAX_DELAY);
+        s_wifi_probe_active = false;
+        xSemaphoreGive(s_mode_mutex);
+        return false;
+    }
+
 
     // Snapshot mode so we know whether to suppress beacon
     bool was_ble_only = (s_ble_node_running && s_mode == NODE_MODE_BLE_ONLY);
@@ -61,6 +95,9 @@ bool try_join_wifi_mesh(uint32_t timeout_ms)
     //     esp_ble_mesh_node_prov_disable(
     //         ESP_BLE_MESH_PROV_ADV | ESP_BLE_MESH_PROV_GATT);
     // }
+
+        xSemaphoreTake(s_mode_mutex, portMAX_DELAY);
+
 
     if (!s_wifi_modules_init) {
         auth_init();
@@ -86,6 +123,7 @@ bool try_join_wifi_mesh(uint32_t timeout_ms)
     uint32_t elapsed = 0;
     while (elapsed < timeout_ms) {
         if (wifi_mesh_alive()) {
+            esp_coex_preference_set(ESP_COEX_PREFER_WIFI);
             ESP_LOGI(TAG, "Joined WiFi mesh after %"PRIu32" ms", elapsed);
             joined = true;
             break;
@@ -118,6 +156,8 @@ bool try_join_wifi_mesh(uint32_t timeout_ms)
             esp_ble_mesh_node_prov_enable(
                 ESP_BLE_MESH_PROV_ADV | ESP_BLE_MESH_PROV_GATT);
         }
+            esp_coex_preference_set(ESP_COEX_PREFER_BT);
+
     }
 
     s_wifi_probe_active = false;
@@ -183,6 +223,7 @@ static void ble_stabilize_and_advertise_task(void *arg)
    ═══════════════════════════════════════════════════════════ */
 void enter_ble_node_mode(void)
 {
+
     xSemaphoreTake(s_mode_mutex, portMAX_DELAY);
 
     ESP_LOGI(TAG, "→ Entering BLE NODE mode (stabilizing first)");
@@ -229,7 +270,9 @@ void enter_ble_node_mode(void)
    PUBLIC: enter_wifi_bridge_mode
    ═══════════════════════════════════════════════════════════ */
 void enter_wifi_bridge_mode(void)
-{
+{   
+    esp_coex_preference_set(ESP_COEX_PREFER_WIFI);  // WiFi wins for data transmission
+
     xSemaphoreTake(s_mode_mutex, portMAX_DELAY);
 
     ESP_LOGI(TAG, "→ Entering WIFI BRIDGE mode");
@@ -277,7 +320,7 @@ void demote_to_ble_node_mode(void)
     if (s_wifi_running) {
         ESP_LOGI(TAG, "  stopping WiFi mesh...");
         mesh_deinit();
-        esp_mesh_stop();
+        //esp_mesh_stop();
         mqtt_deinit();
         esp_wifi_stop();
         auth_deinit();
@@ -291,6 +334,8 @@ void demote_to_ble_node_mode(void)
 
     xSemaphoreGive(s_mode_mutex);  // unlock BEFORE enter_ble_node_mode
                                     // because enter_ble_node_mode also takes mutex
+    esp_coex_preference_set(ESP_COEX_PREFER_BT);  // BLE wins
+
     enter_ble_node_mode();
 }
 
@@ -331,11 +376,11 @@ static void mode_monitor_task(void *arg)
                          ble_retry_count);
                 break;
             }
-                // ← Add this block
-            if (s_ble_node_running && !node_is_config_complete()) {
-                ESP_LOGI(TAG, "[monitor] BLE provisioning in progress — skipping WiFi probe");
-                break;
-            }
+            //     // ← Add this block
+            // if (s_ble_node_running && !node_is_config_complete()) {
+            //     ESP_LOGI(TAG, "[monitor] BLE provisioning in progress — skipping WiFi probe");
+            //     break;
+            // }
 
             
             ESP_LOGI(TAG, "[monitor] BLE-only — waiting 10s before WiFi probe...");
@@ -356,32 +401,80 @@ static void mode_monitor_task(void *arg)
             break;
         }
 
-        case NODE_MODE_WIFI_BRIDGE: {
-            ble_retry_count = 0;
-            if (!wifi_mesh_alive()) {
-                wifi_loss_count++;
-                ESP_LOGW(TAG, "[monitor] WiFi mesh not alive (%d/%d)",
-                         wifi_loss_count, WIFI_LOSS_THRESHOLD);
-                // if (wifi_loss_count == 2) {
-                //     mesh_deinit();
-                //     esp_mesh_stop();
-                //     esp_ble_mesh_node_prov_disable(
-                //         ESP_BLE_MESH_PROV_ADV | ESP_BLE_MESH_PROV_GATT);
-                // }
+       case NODE_MODE_WIFI_BRIDGE: {
+                // Stronger health tracking
+        static int bad_link_count = 0;
 
-                if (wifi_loss_count >= WIFI_LOSS_THRESHOLD) {
-                    wifi_loss_count = 0;
-                    demote_to_ble_node_mode();
-                }
-            } else {
-                if (wifi_loss_count > 0)
-                    ESP_LOGI(TAG, "[monitor] WiFi mesh recovered");
-                wifi_loss_count = 0;
-                ESP_LOGI(TAG, "[monitor] WiFi mesh OK | BLE bridge load: %d",
-                         ble_bridge_get_load());
+        wifi_ap_record_t ap;
+        bool ap_ok = (esp_wifi_sta_get_ap_info(&ap) == ESP_OK);
+        bool mesh_ok = wifi_mesh_alive();
+
+        // --- Detect DEAD link conditions ---
+        bool dead_link = false;
+
+        // 1. Mesh itself reports unhealthy
+        if (!mesh_ok) {
+            ESP_LOGW(TAG, "[monitor] Mesh reports NOT healthy");
+            dead_link = true;
+        }
+
+        // 2. Cannot even get AP info
+        if (!ap_ok) {
+            ESP_LOGW(TAG, "[monitor] Cannot get AP info");
+            dead_link = true;
+        }
+
+        // 3. RSSI invalid (VERY IMPORTANT FIX)
+        if (ap_ok && ap.rssi == 0) {
+            ESP_LOGW(TAG, "[monitor] RSSI = 0 → invalid link");
+            dead_link = true;
+        }
+
+        // --- Handle BAD link ---
+        if (dead_link) {
+            bad_link_count++;
+
+            ESP_LOGW(TAG, "[monitor] Bad link detected (%d/%d)",
+                    bad_link_count, WIFI_LOSS_THRESHOLD);
+
+            if (bad_link_count >= WIFI_LOSS_THRESHOLD) {
+                ESP_LOGW(TAG, "[monitor] Link DEAD → forcing mesh disconnect");
+
+                // 🔥 FORCE cleanup (this is what ESP-MESH won't do itself)
+                esp_mesh_disconnect();
+                esp_mesh_stop();
+
+                esp_coex_preference_set(ESP_COEX_PREFER_BT);
+
+                bad_link_count = 0;
+                demote_to_ble_node_mode();
+                break;
             }
+
+            continue; // skip rest of checks this cycle
+        }
+
+        // --- Link is ALIVE here ---
+        bad_link_count = 0;
+
+        // Now check signal strength
+        ESP_LOGI(TAG, "[monitor] WiFi RSSI: %d (threshold: %d)",
+                ap.rssi, WIFI_RSSI_DEMOTE_THRESHOLD);
+
+        if (ap.rssi < WIFI_RSSI_DEMOTE_THRESHOLD) {
+            ESP_LOGW(TAG, "[monitor] Weak signal (%d) → demoting to BLE",
+                    ap.rssi);
+
+            esp_mesh_disconnect();
+            esp_mesh_stop();
+
+            esp_coex_preference_set(ESP_COEX_PREFER_BT);
+
+            demote_to_ble_node_mode();
             break;
         }
+        break;
+    }
 
         default:
             break;
@@ -401,7 +494,15 @@ void mode_init(void)
              WIFI_MESH_JOIN_TIMEOUT_MS);
 
 
-
+    esp_err_t   ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
+        ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
     bool joined = try_join_wifi_mesh(WIFI_MESH_JOIN_TIMEOUT_MS);
 
     ESP_LOGI(TAG, "Joined %d", joined);

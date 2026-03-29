@@ -352,8 +352,8 @@ esp_err_t mesh_init(void)
 
     /* 2. TCP/IP stack + event loop — one time only */
     if (!s_netif_created) {
-        ESP_ERROR_CHECK(esp_netif_init());
-        ESP_ERROR_CHECK(esp_event_loop_create_default());
+        // ESP_ERROR_CHECK(esp_netif_init());
+        // ESP_ERROR_CHECK(esp_event_loop_create_default());
         ESP_ERROR_CHECK(
             esp_netif_create_default_wifi_mesh_netifs(&s_netif_sta, &s_netif_ap));
         s_netif_created = true;
@@ -366,10 +366,10 @@ esp_err_t mesh_init(void)
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_FLASH));
     ESP_ERROR_CHECK(esp_wifi_start());
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
-        wifi_config_t sta_cfg = {};
-    esp_wifi_get_config(WIFI_IF_STA, &sta_cfg);
-    sta_cfg.sta.scan_method = WIFI_SCAN_TYPE_PASSIVE;
-    esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
+    //     wifi_config_t sta_cfg = {};
+    // esp_wifi_get_config(WIFI_IF_STA, &sta_cfg);
+    // sta_cfg.sta.scan_method = WIFI_SCAN_TYPE_PASSIVE;
+    // esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
 
 
     /* 4. Mesh init then register handlers */
