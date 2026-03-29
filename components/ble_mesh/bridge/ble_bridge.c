@@ -196,7 +196,7 @@ static void send_appkey_to_node(uint16_t addr)
         .ctx.app_idx  = 0,
         .ctx.addr     = addr,
         .ctx.send_ttl = 3,
-        .msg_timeout  = 20000,
+        .msg_timeout  = 30000,
     };
     esp_err_t e = esp_ble_mesh_config_client_set_state(&common, &set);
     ESP_LOGI(TAG, "AppKey → 0x%04x: %s", addr, esp_err_to_name(e));
@@ -267,6 +267,8 @@ static void config_node_task(void *arg)
 
         while (job.state != CFG_STATE_DONE && job.retries < MAX_RETRIES) {
 
+            esp_coex_preference_set(ESP_COEX_PREFER_BT);
+
             if (job.state == CFG_STATE_APPKEY)
                 send_appkey_to_node(job.addr);
             else if (job.state == CFG_STATE_MODELBIND)
@@ -276,6 +278,7 @@ static void config_node_task(void *arg)
                Timeout is slightly longer than msg_timeout (10 s). */
             cfg_result_t result;
             if (xQueueReceive(s_cfg_result, &result, pdMS_TO_TICKS(22000)) != pdTRUE) {
+                esp_coex_preference_set(ESP_COEX_PREFER_WIFI);
                 job.retries++;
                 ESP_LOGW(TAG, "No result for 0x%04x state=%d retry=%d/%d",
                          job.addr, job.state, job.retries, MAX_RETRIES);
@@ -316,6 +319,8 @@ static void config_node_task(void *arg)
             ESP_LOGE(TAG, "Giving up on 0x%04x after %d retries",
                      job.addr, MAX_RETRIES);
     }
+        esp_coex_preference_set(ESP_COEX_PREFER_WIFI);
+
 }
 
 /* ═══════════════════════════════════════════════════════════
