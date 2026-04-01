@@ -18,6 +18,8 @@
 #include "esp_ble_mesh_provisioning_api.h"
 #include "esp_ble_mesh_config_model_api.h"
 #include "esp_ble_mesh_local_data_operation_api.h"
+#include "esp_bt_device.h"
+#include "esp_gap_ble_api.h"
 #include "esp_coexist.h"
 #include "esp_bt.h"
 #include "esp_mac.h"
@@ -25,6 +27,7 @@
 #include "esp_wifi.h"
 #include "esp_random.h"
 #include "esp_log.h"
+
 
 #include "../../configuration/air_ble_mesh.h"
 #include "../../configuration/air_mesh.h"
@@ -267,7 +270,7 @@ static void config_node_task(void *arg)
 
         while (job.state != CFG_STATE_DONE && job.retries < MAX_RETRIES) {
 
-            esp_coex_preference_set(ESP_COEX_PREFER_BT);
+            esp_coex_preference_set(ESP_COEX_PREFER_BT);  // ← boost before sending
 
             if (job.state == CFG_STATE_APPKEY)
                 send_appkey_to_node(job.addr);
@@ -278,7 +281,8 @@ static void config_node_task(void *arg)
                Timeout is slightly longer than msg_timeout (10 s). */
             cfg_result_t result;
             if (xQueueReceive(s_cfg_result, &result, pdMS_TO_TICKS(22000)) != pdTRUE) {
-                esp_coex_preference_set(ESP_COEX_PREFER_WIFI);
+                // esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);  // ← restore on timeout
+
                 job.retries++;
                 ESP_LOGW(TAG, "No result for 0x%04x state=%d retry=%d/%d",
                          job.addr, job.state, job.retries, MAX_RETRIES);
@@ -319,7 +323,7 @@ static void config_node_task(void *arg)
             ESP_LOGE(TAG, "Giving up on 0x%04x after %d retries",
                      job.addr, MAX_RETRIES);
     }
-        esp_coex_preference_set(ESP_COEX_PREFER_WIFI);
+    // esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);  // ← restore on success
 
 }
 
@@ -448,9 +452,35 @@ static void prov_cb(esp_ble_mesh_prov_cb_event_t event,
         break;
     }
 
+    case ESP_BLE_MESH_PROVISIONER_PROV_LINK_OPEN_EVT:
+        ESP_LOGI(TAG, "Provisioning link opened — boosting BLE priority");
+         esp_coex_preference_set(ESP_COEX_PREFER_BT);
+                    esp_wifi_set_ps(WIFI_PS_MIN_MODEM);  // Reduce Wi-Fi power save
+            esp_wifi_set_max_tx_power(20);   // Minimum power
+
+        break;
+    
+      case ESP_BLE_MESH_PROVISIONER_PROV_LINK_CLOSE_EVT:
+            // Link closed (either success, failure, or timeout).
+            // Restore power just in case, especially if provisioning fails.
+            ESP_LOGW(TAG, "Provisioning link closed (reason: %d), restoring Wi-Fi TX power.", 
+                     param->provisioner_prov_link_close.reason);
+               if (param->provisioner_prov_link_close.reason == 1) {
+                // Reason 1 = timeout - need to retry
+                ESP_LOGW(TAG, "Provisioning timeout, will retry...");
+            }
+            esp_wifi_set_max_tx_power(78);
+            esp_wifi_set_ps(WIFI_PS_NONE);
+            break;
+
+
     case ESP_BLE_MESH_PROVISIONER_PROV_COMPLETE_EVT: {
         uint16_t addr = param->provisioner_prov_complete.unicast_addr;
         ESP_LOGI(TAG, "Provisioned 0x%04x — queuing config job", addr);
+                 esp_wifi_set_max_tx_power(78);   // Restore power
+            esp_wifi_set_ps(WIFI_PS_NONE);
+
+        // esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);  // ← restore after prov done
 
         /* Small delay so node can store provisioning keys before we
            start sending config messages */
@@ -582,6 +612,15 @@ esp_err_t ble_bridge_init(void)
     esp_ble_mesh_register_prov_callback(prov_cb);
     esp_ble_mesh_register_custom_model_callback(model_cb);
     esp_ble_mesh_register_config_client_callback(config_client_cb);
+
+        esp_ble_scan_params_t scan_params = {
+        .scan_type = BLE_SCAN_TYPE_ACTIVE,
+        .own_addr_type = BLE_ADDR_TYPE_PUBLIC,
+        .scan_filter_policy = BLE_SCAN_FILTER_ALLOW_ALL,
+        .scan_interval = 0x50,   // 50 ms
+        .scan_window = 0x50,      // MUST equal scan_interval for coexistence
+        .scan_duplicate = BLE_SCAN_DUPLICATE_DISABLE
+    };
 
     err = esp_ble_mesh_init(&s_prov, &s_comp);
     if (err != ESP_OK) {

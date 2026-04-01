@@ -123,7 +123,7 @@ bool try_join_wifi_mesh(uint32_t timeout_ms)
     uint32_t elapsed = 0;
     while (elapsed < timeout_ms) {
         if (wifi_mesh_alive()) {
-            esp_coex_preference_set(ESP_COEX_PREFER_WIFI);
+            esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);  // ← change to BALANCE
             ESP_LOGI(TAG, "Joined WiFi mesh after %"PRIu32" ms", elapsed);
             joined = true;
             break;
@@ -271,7 +271,7 @@ void enter_ble_node_mode(void)
    ═══════════════════════════════════════════════════════════ */
 void enter_wifi_bridge_mode(void)
 {   
-    esp_coex_preference_set(ESP_COEX_PREFER_WIFI);  // WiFi wins for data transmission
+    esp_coex_preference_set(ESP_COEX_PREFER_BT);  // WiFi wins for data transmission
 
     xSemaphoreTake(s_mode_mutex, portMAX_DELAY);
 
@@ -297,7 +297,7 @@ void enter_wifi_bridge_mode(void)
 
     s_mode = NODE_MODE_WIFI_BRIDGE;
     ESP_LOGI(TAG, "WiFi bridge mode active");
-
+    // esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);  // WiFi wins for data transmission
     xSemaphoreGive(s_mode_mutex);
 }
 
