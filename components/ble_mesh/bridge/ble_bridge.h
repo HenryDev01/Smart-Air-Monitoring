@@ -18,6 +18,7 @@ esp_err_t ble_bridge_init(void);
 esp_err_t ble_bridge_deinit(void);
 bool      ble_bridge_is_provisioned(void);
 uint8_t   ble_bridge_get_load(void);   /* number of M5StickC using us */
+bool ble_bridge_is_prov_in_progress(void);
 
 
 //void ble_bridge_set_root(bool is_root);

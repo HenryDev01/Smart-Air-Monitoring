@@ -352,8 +352,8 @@ esp_err_t mesh_init(void)
 
     /* 2. TCP/IP stack + event loop — one time only */
     if (!s_netif_created) {
-        // ESP_ERROR_CHECK(esp_netif_init());
-        // ESP_ERROR_CHECK(esp_event_loop_create_default());
+        ESP_ERROR_CHECK(esp_netif_init());
+        ESP_ERROR_CHECK(esp_event_loop_create_default());
         ESP_ERROR_CHECK(
             esp_netif_create_default_wifi_mesh_netifs(&s_netif_sta, &s_netif_ap));
         s_netif_created = true;

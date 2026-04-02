@@ -270,7 +270,7 @@ static void config_node_task(void *arg)
 
         while (job.state != CFG_STATE_DONE && job.retries < MAX_RETRIES) {
 
-            esp_coex_preference_set(ESP_COEX_PREFER_BT);  // ← boost before sending
+            // esp_coex_preference_set(ESP_COEX_PREFER_BT);  // ← boost before sending
 
             if (job.state == CFG_STATE_APPKEY)
                 send_appkey_to_node(job.addr);
@@ -280,7 +280,7 @@ static void config_node_task(void *arg)
             /* Wait for config_client_cb to post the result.
                Timeout is slightly longer than msg_timeout (10 s). */
             cfg_result_t result;
-            if (xQueueReceive(s_cfg_result, &result, pdMS_TO_TICKS(22000)) != pdTRUE) {
+            if (xQueueReceive(s_cfg_result, &result, pdMS_TO_TICKS(35000)) != pdTRUE) {
                 // esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);  // ← restore on timeout
 
                 job.retries++;
@@ -322,6 +322,11 @@ static void config_node_task(void *arg)
         if (job.retries >= MAX_RETRIES)
             ESP_LOGE(TAG, "Giving up on 0x%04x after %d retries",
                      job.addr, MAX_RETRIES);
+         /* Restore Wi-Fi priority now that BLE config is done */
+        // esp_coex_preference_set(ESP_COEX_PREFER_WIFI);
+        // esp_wifi_set_max_tx_power(78);
+        // esp_wifi_set_ps(WIFI_PS_NONE);
+        ESP_LOGI(TAG, "BLE config done — Wi-Fi priority restored");
     }
     // esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);  // ← restore on success
 
@@ -437,6 +442,7 @@ static void prov_cb(esp_ble_mesh_prov_cb_event_t event,
         break;
 
     case ESP_BLE_MESH_PROVISIONER_RECV_UNPROV_ADV_PKT_EVT: {
+        
         esp_ble_mesh_unprov_dev_add_t add = {0};
         memcpy(add.addr, param->provisioner_recv_unprov_adv_pkt.addr, 6);
         add.addr_type = param->provisioner_recv_unprov_adv_pkt.addr_type;
@@ -454,9 +460,9 @@ static void prov_cb(esp_ble_mesh_prov_cb_event_t event,
 
     case ESP_BLE_MESH_PROVISIONER_PROV_LINK_OPEN_EVT:
         ESP_LOGI(TAG, "Provisioning link opened — boosting BLE priority");
-         esp_coex_preference_set(ESP_COEX_PREFER_BT);
-                    esp_wifi_set_ps(WIFI_PS_MIN_MODEM);  // Reduce Wi-Fi power save
-            esp_wifi_set_max_tx_power(20);   // Minimum power
+        //  esp_coex_preference_set(ESP_COEX_PREFER_BT);
+        // esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+        // esp_wifi_set_max_tx_power(8);        // ← even lower (was 20)
 
         break;
     
@@ -469,22 +475,28 @@ static void prov_cb(esp_ble_mesh_prov_cb_event_t event,
                 // Reason 1 = timeout - need to retry
                 ESP_LOGW(TAG, "Provisioning timeout, will retry...");
             }
-            esp_wifi_set_max_tx_power(78);
-            esp_wifi_set_ps(WIFI_PS_NONE);
+            // esp_wifi_set_max_tx_power(78);
+            // esp_wifi_set_ps(WIFI_PS_NONE);
             break;
+                /* ADD THIS — it fires when provisioning actually fails with details */
+    case ESP_BLE_MESH_PROVISIONER_ADD_UNPROV_DEV_COMP_EVT:
+        ESP_LOGI(TAG, "Add unprov dev complete — err: 0x%04x (%s)",
+                param->provisioner_add_unprov_dev_comp.err_code,
+                esp_err_to_name(param->provisioner_add_unprov_dev_comp.err_code));
+        break;
 
 
     case ESP_BLE_MESH_PROVISIONER_PROV_COMPLETE_EVT: {
         uint16_t addr = param->provisioner_prov_complete.unicast_addr;
         ESP_LOGI(TAG, "Provisioned 0x%04x — queuing config job", addr);
-                 esp_wifi_set_max_tx_power(78);   // Restore power
-            esp_wifi_set_ps(WIFI_PS_NONE);
+            //      esp_wifi_set_max_tx_power(78);   // Restore power
+            // esp_wifi_set_ps(WIFI_PS_NONE);
 
         // esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);  // ← restore after prov done
 
         /* Small delay so node can store provisioning keys before we
            start sending config messages */
-        vTaskDelay(pdMS_TO_TICKS(2000));
+        // vTaskDelay(pdMS_TO_TICKS(2000));
 
         cfg_job_t job = {
             .addr    = addr,
@@ -567,7 +579,7 @@ esp_err_t ble_bridge_init(void)
         ESP_LOGE(TAG, "bt_controller_init: %s", esp_err_to_name(err)); return err;
     }
 
-    // ESP_ERROR_CHECK(esp_coex_preference_set(ESP_COEX_PREFER_BALANCE));
+    ESP_ERROR_CHECK(esp_coex_preference_set(ESP_COEX_PREFER_BALANCE));
 
     err = esp_bt_controller_enable(ESP_BT_MODE_BLE);
     if (err != ESP_OK) {
@@ -679,7 +691,7 @@ esp_err_t ble_bridge_deinit(void)
  
     /* 2. Tear down BLE Mesh stack */
     esp_ble_mesh_deinit_param_t param = {
-    .erase_flash = true  // true if you want to wipe provisioning data from flash
+    .erase_flash = false  // true if you want to wipe provisioning data from flash
     };
     err = esp_ble_mesh_deinit(&param);
     if (err != ESP_OK)

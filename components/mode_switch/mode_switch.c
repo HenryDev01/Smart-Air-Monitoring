@@ -202,19 +202,20 @@ static void ble_stabilize_and_advertise_task(void *arg)
 
     /* Now it is safe to start advertising. */
     xSemaphoreTake(s_mode_mutex, portMAX_DELAY);
-    if (s_mode == NODE_MODE_BLE_STABILIZING) {          // guard: mode may have
-        s_mode = NODE_MODE_BLE_ONLY;                    // changed during wait
-        xSemaphoreGive(s_mode_mutex);
+   if (s_mode == NODE_MODE_BLE_STABILIZING) {
+    s_mode = NODE_MODE_BLE_ONLY;
+    xSemaphoreGive(s_mode_mutex);
 
+    if (esp_ble_mesh_node_is_provisioned()) {
+        ESP_LOGI(TAG, "[stabilize] Already provisioned — skipping beacon, starting sensor task");
+    } else {
         esp_ble_mesh_node_prov_enable(
             ESP_BLE_MESH_PROV_ADV | ESP_BLE_MESH_PROV_GATT);
         ESP_LOGI(TAG, "[stabilize] BLE node fully active — now provisionable");
-    } else {
-        xSemaphoreGive(s_mode_mutex);
-        ESP_LOGI(TAG, "[stabilize] mode changed during stabilization (%d), skipping adv enable",
-                 s_mode);
     }
-
+} else {
+    xSemaphoreGive(s_mode_mutex);
+}
     vTaskDelete(NULL);
 }
 

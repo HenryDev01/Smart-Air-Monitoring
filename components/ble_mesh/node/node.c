@@ -305,7 +305,11 @@ esp_err_t node_init_silent(void)
         s_my_addr     = esp_ble_mesh_get_primary_element_address();
         s_app_idx     = PROV_APP_IDX;
         s_net_idx     = PROV_NET_IDX;
+        s_config_complete = true;  /* already provisioned + configured from NVS */
         ESP_LOGI(TAG, "Already provisioned (NVS) addr=0x%04X", s_my_addr);
+            esp_ble_mesh_model_subscribe_group_addr(
+        s_my_addr, CID_ESP, VENDOR_MODEL_ID, GROUP_BRIDGE_ADVERT);
+
     }
     /* ← beacon NOT started here */
 
@@ -438,7 +442,7 @@ esp_err_t node_deinit(void)
  
     /* 2. Tear down the BLE Mesh stack */
     esp_ble_mesh_deinit_param_t param = {
-    .erase_flash = true  // true if you want to wipe provisioning data from flash
+    .erase_flash = false  // true if you want to wipe provisioning data from flash
     };
     esp_ble_mesh_deinit(&param);
     if (err != ESP_OK)
